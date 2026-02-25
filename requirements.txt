@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+plotly
+pydeck
+geopy
+chromadb
+sentence-transformers
+openpyxl
+python-dotenv
+requests
+streamlit-mic-recorder
+gTTS

@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+cache/
+chroma_db/
+.streamlit/
+test_*.py
+diag_*.py
+check_*.py
+inspect_*.py
+*.bat
+_test_*.py
+requirements.txt.txt
+.dockerignore.txt
+docx_content.txt
+cols.txt
