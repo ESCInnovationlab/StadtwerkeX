@@ -599,6 +599,16 @@ elif active_tab == tab_labels[3]:
         
         col1, col2 = st.columns([2.5, 1.5])
         
+        # Action Buttons Row
+        with col1:
+            btn_c1, btn_c2, _ = st.columns([1.5, 2, 3])
+            if btn_c1.button("🗑️ Chat löschen", use_container_width=True):
+                st.session_state.history = []
+                st.rerun()
+            if btn_c2.button("🛑 Sprache stoppen", use_container_width=True):
+                st.session_state.speak_text = ""
+                st.rerun()
+
         with col2:
             st.markdown("**Strategische Analyse-vorgaben**")
             # Professional suggested queries in a scrollable container
