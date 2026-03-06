@@ -523,9 +523,25 @@ elif active_tab == tab_labels[1]:
 
                     # HIGHLIGHT SELECTED CUSTOMER: Add a special red icon outside Cluster
                     if st.session_state.selected_customer_id == cust_id:
+                        highlight_popup = f"""
+                        <div style="font-family: 'Outfit', sans-serif; min-width: 250px; font-size: 13px;">
+                            <h4 style="margin: 0 0 10px 0; color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 5px;">
+                                ⭐ AUSGEWÄHLT: {cust_id}
+                            </h4>
+                            <table style="width: 100%; border-collapse: collapse;">
+                                <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Gemeinde', row.get('Ort', 'Wülfrath'))}</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>⚠️ Risiko:</b></td><td style="color: {color}; font-weight: bold;">{risk_status}</td></tr>
+                            </table>
+                        </div>
+                        """
                         folium.Marker(
                             location=[row["lat"], row["lon"]],
-                            popup=folium.Popup(f"<b>AUSGEWÄHLTER ANSCHLUSS: {cust_id}</b>", max_width=250),
+                            popup=folium.Popup(highlight_popup, max_width=350),
+                            tooltip=f"KLICK FÜR DETAILS: {cust_id}",
                             icon=folium.Icon(color="red", icon="star", prefix="fa" if "fa" in "" else "glyphicon")
                         ).add_to(m)
                 
