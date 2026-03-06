@@ -139,6 +139,7 @@ if "map_center" not in st.session_state: st.session_state.map_center = None
 if "map_zoom" not in st.session_state: st.session_state.map_zoom = 13
 if "last_utility" not in st.session_state: st.session_state.last_utility = None
 if "target_tab" not in st.session_state: st.session_state.target_tab = None
+if "last_map_idx" not in st.session_state: st.session_state.last_map_idx = None
 
 # CRITICAL: If a target tab is set, override the logical and widget state BEFORE the UI renders
 if st.session_state.target_tab and st.session_state.target_tab in ["📉 Strategische Analyse", "🗺️ Netz-Karte", "🛡️ Compliance & Daten", "🤖 AI -Assistent"]:
@@ -539,11 +540,14 @@ elif active_tab == tab_labels[1]:
                 
                 if event_map and event_map.selection.rows:
                     idx = event_map.selection.rows[0]
-                    row_map = map_df.iloc[idx]
-                    if pd.notna(row_map["lat"]) and pd.notna(row_map["lon"]):
-                        st.session_state.map_center = [row_map["lat"], row_map["lon"]]
-                        st.session_state.map_zoom = 18
-                        st.rerun()
+                    # Only rerun if selection actually changed
+                    if st.session_state.last_map_idx != idx:
+                        row_map = map_df.iloc[idx]
+                        if pd.notna(row_map["lat"]) and pd.notna(row_map["lon"]):
+                            st.session_state.last_map_idx = idx
+                            st.session_state.map_center = [row_map["lat"], row_map["lon"]]
+                            st.session_state.map_zoom = 18
+                            st.rerun()
         else:
             st.warning("⚠️ **Keine Daten auf Karte anzeigbar.**")
             st.info("Bitte stellen Sie sicher, dass die Excel-Spalten für Latitude/Longitude ausgefüllt sind und klicken Sie in der Sidebar auf **'🔄 KI-Speicher aktualisieren'**.")
