@@ -189,7 +189,7 @@ class EnergyRAG:
         
         # 1. Direct ID Lookup (Prioritized for Queries only)
         id_match = re.search(r'(\d+)', ql)
-        if id_match and not any(x in ql for x in ["älter", "jahre", "vor", "nach", "count", "anzahl"]):
+        if id_match and not any(x in ql for x in ["älter", "jahre", "vor", "nach", "count", "anzahl", "old", "older", "years", "more", "over", "über", "list", "table", "tabelle", "alle", "all"]):
             sid = id_match.group(1)
             search_df = self.unified_df.copy()
             
@@ -231,6 +231,25 @@ class EnergyRAG:
                     lines.append(f"🏗️ **Material:** {res.get('Werkstoff', 'n/a')}")
                     lines.append(f"⚠️ **Risiko:** {res.get('Risiko', 'n/a')}")
                 
+                if any(x in ql for x in ["karte", "map", "zeige", "view", "show"]):
+                    if pd.notna(res.get("lat")) and pd.notna(res.get("lon")):
+                        return {
+                            "answer": f"📍 **Navigation zur Karte gestartet...**\nIch zeige Ihnen den Anschluss `{res.get('Kundennummer', sid)}` ({res.get('Sparte', '')}) in der `{res.get('Straße', '')} {res.get('Hausnummer', '')}` auf der Karte.",
+                            "hits": [],
+                            "model_used": "Navigation-Engine-v1",
+                            "switched": True,
+                            "pending_action": {
+                                "type": "navigate_map",
+                                "args": {
+                                    "customer_id": str(res.get("Kundennummer", sid)),
+                                    "lat": float(res["lat"]),
+                                    "lon": float(res["lon"])
+                                }
+                            }
+                        }
+                    else:
+                        return {"answer": f"⚠️ Der Kunde `{sid}` wurde gefunden, hat aber leider keine Koordinaten für die Karte.", "hits": [], "model_used": "Navigation-Engine-v1", "switched": True}
+
                 return {"answer": "\n".join(lines), "hits": [], "model_used": "Direct-ID-Engine-v2", "switched": True}
 
         # 2. Greetings (Fixed for False Positives like "whicH I...")
@@ -254,7 +273,7 @@ class EnergyRAG:
             except: pass
 
         # 4. Numeric Filters
-        age_match = re.search(r'(älter|older|>)\s*(\d+)', ql)
+        age_match = re.search(r'(älter|older|>|über|over|more\s*than)\s*(?:als\s*|than\s*)?(\d+)', ql)
         if age_match:
             try:
                 threshold = int(age_match.group(2))
@@ -266,24 +285,39 @@ class EnergyRAG:
                     return {"answer": "\n".join(lines), "hits": [], "model_used": "Filter-Engine", "switched": True}
             except: pass
 
+        # 5. General Map Navigation
+        if any(x in ql for x in ["karte", "map", "landkarte", "netz-karte", "zeige", "view", "show", "öffne", "open"]) and not id_match:
+             return {
+                "answer": "🗺️ **Ich öffne die Netz-Karte für Sie...**",
+                "hits": [],
+                "model_used": "Navigation-Engine-v1",
+                "switched": True,
+                "pending_action": {"type": "navigate_map_general", "args": {}}
+            }
+
         return None
 
-    def answer_question(self, question: str, utility: Optional[str] = None) -> Dict[str, Any]:
+    def answer_question(self, question: str, utility: Optional[str] = None, history: Optional[List[Dict]] = None) -> Dict[str, Any]:
         ql = (question or "").lower()
-        print(f"DEBUG: Processing question: '{ql[:50]}...'")
         
         # 0. SKIP FAST ENGINE FOR UPDATES (Force Agentic Tool Mode)
         update_keywords = ["update", "ändern", "setze", "change", "aktualisier", "korrigier", "fix", "put", "schreib"]
         is_update = any(x in ql for x in update_keywords)
-        print(f"DEBUG: is_update detected: {is_update}")
         
+        search_query = question
+        if history:
+            history_to_use = history[:-1] if history and history[-1].get("content", "") == question else history
+            last_user_msg = next((h["content"] for h in reversed(history_to_use) if h["role"] == "user"), "")
+            
+            # If current question is a follow up (short or lacks numbers), prepend the previous user message for context
+            if last_user_msg and len(question.split()) < 10 and not re.search(r'\d+', question):
+                search_query = f"{last_user_msg}. {question}"
+                
+        # For the fast lookup dataframe engine, we might also want to try the search_query to pull the right ID context
         if not is_update:
-            df_res = self._try_dataframe_answer(question)
+            df_res = self._try_dataframe_answer(search_query)  # Use the context-aware query here too!
             if df_res: 
-                print("DEBUG: Handled by fast-lookup engine.")
                 return df_res
-        else:
-            print("DEBUG: Update detected. Skipping fast-lookup, forcing Agentic Tool Mode.")
 
         status = self.check_llm_status()
         if not status["ok"]:
@@ -291,7 +325,7 @@ class EnergyRAG:
 
         hits = []
         try:
-            results = self.vs.query(query_embeddings=self.embedder.embed([question]), top_k=4)
+            results = self.vs.query(query_embeddings=self.embedder.embed([search_query]), top_k=4)
             hits = [{"meta": m, "doc": d, "score": 1-dist} for m, d, dist in zip(results["metadatas"][0], results["documents"][0], results["distances"][0])]
             
             ctx = "\n---\n".join([h["doc"] for h in hits])
@@ -320,50 +354,134 @@ class EnergyRAG:
                                 "required": ["customer_id", "field_name", "new_value", "utility"]
                             }
                         }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "navigate_to_map",
+                            "description": "Navigates to the map view for a specific customer or the general map. Call this when the user asks to see a customer, an address, or simply 'the map'.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "customer_id": {"type": "string", "description": "Optional Customer ID to show on map. If omitted, shows general map."}
+                                }
+                            }
+                        }
                     }
                 ]
                 payload = {
                     "model": self.llm_model,
                     "messages": [
                         {"role": "system", "content": (
-                            "You are the ESC Agentic Assistant. You have FULL AUTHORITY to update the database. "
-                            "When the user asks to change any value, IMMEDIATELY call the update_asset tool. "
-                            "If utility is unclear, use 'Gemeinsam' for address fields (Hausnummer, Stra\u00dfe, Gemeinde)."
-                        )},
-                        {"role": "user", "content": f"Question: {question}"}
+                            "You are the ESC Agentic Assistant. You have tools to update the database and navigate the map. "
+                            "1. If the user asks to change/update a value, use 'update_asset'. "
+                            "2. If the user asks to see a customer or address on the map OR simply requests the map view, use 'navigate_to_map'. "
+                            "3. If the user says 'Yes', 'Ja', 'Gerne' or similar after you offered to show the map, use 'navigate_to_map'. "
+                            "CRITICAL: If the user wants to see the map, ONLY call the tool. Do NOT provide coordinates in text. "
+                            "CRITICAL MAP INSTRUCTION: ONLY use the 'navigate_to_map' tool IF the user EXPLICITLY asks to view a map, or confirms they want to see the map (e.g. 'Yes', 'Show me'). "
+                            "NEVER use the map tool as a fallback or for answering questions like 'how old is it' or 'what is the material'. "
+                            "Be proactive. In the same language as the question."
+                        )}
                     ],
                     "tools": tools,
-                    "tool_choice": "required",
+                    "tool_choice": "auto",
                     "temperature": 0.0,
                     "max_tokens": 300
                 }
+                # Add history if available (map 'bot' to 'assistant')
+                if history:
+                    history_to_use = history[:-1] if history[-1].get("content", "") == question else history
+                    for h in history_to_use[-6:]:
+                        role = "assistant" if h["role"] == "bot" else h["role"]
+                        payload["messages"].append({"role": role, "content": h["content"]})
+                
+                payload["messages"].append({"role": "user", "content": f"Question: {question}"})
             else:
-                # --- FAST READ MODE: no tools, minimal tokens ---
+                # --- FAST READ MODE WITHOUT TOOLS ---
+                # We disable tools for read mode completely to prevent hallucination, rely on fast-engine for map nav.
                 payload = {
                     "model": self.llm_model,
                     "messages": [
-                        {"role": "system", "content": f"You are an infrastructure data expert. Answer concisely in the same language as the question. Context: {self.reference_manual[:500]}"},
-                        {"role": "user", "content": f"Data:\n{ctx}\n\nQuestion: {question}"}
+                        {"role": "system", "content": (
+                            "You are an infrastructure data expert. "
+                            "Answer questions accurately based on the provided Data. Keep it concise, friendly, and in the language of the user."
+                            f"Context: {self.reference_manual[:300]}"
+                        )}
                     ],
                     "temperature": 0.1,
                     "max_tokens": 600
                 }
+                if history:
+                    history_to_use = history[:-1] if history[-1].get("content", "") == question else history
+                    for h in history_to_use[-6:]:
+                        role = "assistant" if h["role"] == "bot" else h["role"]
+                        payload["messages"].append({"role": role, "content": h["content"]})
+                
+                payload["messages"].append({"role": "user", "content": f"Data:\n{ctx}\n\nQuestion: {question}"})
 
             resp = requests.post(f"{self.llm_base_url}/chat/completions", headers=headers, json=payload, timeout=30)
             if resp.status_code == 200:
                 choice = resp.json()["choices"][0]
                 msg = choice["message"]
                 
-                # Check for tool calls (only in agentic mode)
+                # Check for tool calls
                 if "tool_calls" in msg and msg["tool_calls"]:
                     tc = msg["tool_calls"][0]["function"]
                     args = json.loads(tc["arguments"])
-                    return {
-                        "answer": f"🤖 Update erkannt:\n- **Kunde:** `{args.get('customer_id')}`\n- **Feld:** `{args.get('field_name')}`\n- **Neuer Wert:** `{args.get('new_value')}`\n- **Sparte:** `{args.get('utility')}`",
-                        "hits": hits,
-                        "model_used": self.llm_model,
-                        "pending_action": {"type": "update_asset", "args": args}
-                    }
+                    
+                    if tc["name"] == "update_asset":
+                        return {
+                            "answer": f"🤖 Update erkannt:\n- **Kunde:** `{args.get('customer_id')}`\n- **Feld:** `{args.get('field_name')}`\n- **Neuer Wert:** `{args.get('new_value')}`\n- **Sparte:** `{args.get('utility')}`",
+                            "hits": hits,
+                            "model_used": self.llm_model,
+                            "pending_action": {"type": "update_asset", "args": args}
+                        }
+                    
+                    if tc["name"] == "navigate_to_map":
+                        # Try to find the customer in unified_df to get coordinates
+                        sid = args.get("customer_id")
+                        if not sid:
+                            return {
+                                "answer": "🗺️ **Ich öffne die Netz-Karte für Sie...**",
+                                "hits": hits,
+                                "model_used": self.llm_model,
+                                "pending_action": {"type": "navigate_map_general", "args": {}}
+                            }
+
+                        if self.unified_df.empty: self.unified_df = get_unified_df()
+                        # Find the ID (fuzzy)
+                        matches = pd.DataFrame()
+                        for col in ["Kundennummer", "Objekt-ID", "Objekt-ID_Global"]:
+                            if col in self.unified_df.columns:
+                                mask = self.unified_df[col].astype(str).str.contains(rf'\b{sid}\b', regex=True, na=False)
+                                if mask.any():
+                                    matches = self.unified_df[mask]
+                                    break
+                                    
+                        if not matches.empty:
+                            res = matches.iloc[0]
+                            if pd.notna(res.get("lat")) and pd.notna(res.get("lon")):
+                                return {
+                                    "answer": f"📍 **Navigation zur Karte...**\nIch zeige Ihnen den Anschluss `{res.get('Kundennummer')}` on the map.",
+                                    "hits": hits,
+                                    "model_used": self.llm_model,
+                                    "pending_action": {
+                                        "type": "navigate_map", 
+                                        "args": {
+                                            "customer_id": str(res.get("Kundennummer")),
+                                            "lat": float(res["lat"]),
+                                            "lon": float(res["lon"])
+                                        }
+                                    }
+                                }
+                        
+                        # General map navigation if no specific match or no coordinates
+                        return {
+                            "answer": "🗺️ **Ich öffne die Netz-Karte für Sie...**",
+                            "hits": hits,
+                            "model_used": self.llm_model,
+                            "pending_action": {"type": "navigate_map_general", "args": {}}
+                        }
 
                 answer = msg.get("content", "")
                 return {"answer": answer, "hits": hits, "model_used": self.llm_model, "switched": False}
@@ -376,4 +494,4 @@ class EnergyRAG:
         return {"answer": "Keine Antwort gefunden.", "hits": [], "model_used": "Error", "switched": False}
 
     def chat_general(self, user_message: str, history: List[Dict]) -> Dict[str, Any]:
-        return self.answer_question(user_message)
+        return self.answer_question(user_message, history=history)

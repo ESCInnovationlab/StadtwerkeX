@@ -296,8 +296,6 @@ def update_excel_record(customer_id: str, utility: str, field: str, new_value: s
                     break
         
         if not target_col:
-            print(f"DEBUG: No column found for field='{field}', utility='{utility}'")
-            print(f"DEBUG: Available columns: {list(df_raw.columns[:10])}")
             return False
             
         # 2. Fuzzy ID Matching
@@ -311,7 +309,6 @@ def update_excel_record(customer_id: str, utility: str, field: str, new_value: s
                 break
         
         if found_idx is None: 
-            print(f"DEBUG: Customer ID {customer_id} (normalized: {target_sid}) not found.")
             return False
         idx = found_idx
         
@@ -320,20 +317,15 @@ def update_excel_record(customer_id: str, utility: str, field: str, new_value: s
         
         # 4. Save back
         try:
-            print(f"DEBUG: Attempting to save Excel to {EXCEL_FILE} using openpyxl...")
             # Use a context manager to ensure the file is closed
             with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
                 df_raw.to_excel(writer, index=False)
-            print("DEBUG: Excel save successful.")
         except Exception as e:
-            print(f"DEBUG: Primary save failed ({e}). Attempting fallback save...")
             df_raw.to_excel(EXCEL_FILE, index=False)
-            print("DEBUG: Fallback Excel save executed.")
             
         invalidate_cache()
         return True
     except Exception as e:
         import traceback
-        print(f"CRITICAL Excel Update Error: {e}")
         traceback.print_exc()
         return False

@@ -20,7 +20,7 @@ from geo_utils import (
     get_bundling_potential, CURRENT_YEAR
 )
 import folium
-from streamlit_folium import st_folium
+from streamlit_folium import st_folium, folium_static
 from folium.plugins import MarkerCluster
 from streamlit_mic_recorder import mic_recorder
 from gtts import gTTS
@@ -29,6 +29,59 @@ import io
 import base64
 
 load_dotenv()
+
+# Define Reusable Utils for Networks (Global Scope)
+COLOR_MAP = {
+    "Gas": {"main": "#fbbf24", "lateral": "#fde68a", "node": "#d97706"},
+    "Wasser": {"main": "#3b82f6", "lateral": "#93c5fd", "node": "#1d4ed8"},
+    "Strom": {"main": "#8b5cf6", "lateral": "#c4b5fd", "node": "#6d28d9"}
+}
+
+def get_pipeline_style(feature, active_utility):
+    futil = feature.get("properties", {}).get("utility", "")
+    ftype = feature.get("properties", {}).get("type", "")
+    frisk = feature.get("properties", {}).get("risiko", "")
+    
+    is_visible = (active_utility == "Alle Sparten") or (futil == active_utility)
+    if not is_visible:
+        return {"opacity": 0, "fillOpacity": 0, "weight": 0}
+
+    colors = COLOR_MAP.get(futil, {"main": "gray", "lateral": "lightgray", "node": "black"})
+    
+    if ftype == "Main Pipe":
+        return {"color": colors["main"], "weight": 3, "opacity": 1.0}
+    elif ftype == "Lateral":
+        is_high = (frisk == "Hoch")
+        dash = "10, 10" if is_high else None
+        return {
+            "color": colors["lateral"], 
+            "weight": 4 if is_high else 1.5, 
+            "opacity": 1.0,
+            "dashArray": dash
+        }
+    elif ftype == "Node":
+        if frisk == "Hoch":
+            return {
+                "radius": 10,
+                "color": "#ef4444",
+                "fillColor": "#ef4444",
+                "fillOpacity": 1.0, # Increased for visibility
+                "weight": 2,
+                "className": "high-risk-ping"
+            }
+        return {"radius": 4, "color": colors["node"], "fillColor": colors["node"], "fillOpacity": 1, "weight": 1}
+    return {"color": colors["main"], "weight": 2}
+
+def inject_map_animation(map_obj):
+    from branca.element import Element
+    map_obj.get_root().header.add_child(Element("""
+    <style>
+    @keyframes dash_flow { to { stroke-dashoffset: -50; } }
+    @keyframes pulse_ping { 0% { stroke-width: 2px; stroke-opacity: 1; } 100% { stroke-width: 15px; stroke-opacity: 0; } }
+    path[stroke-dasharray] { animation: dash_flow 1s linear infinite !important; }
+    .high-risk-ping { animation: pulse_ping 1.5s ease-out infinite !important; }
+    </style>
+    """))
 
 # ─────────────── Konfiguration ──────────────────────────────────────
 st.set_page_config(
@@ -147,6 +200,7 @@ if "speak_text" not in st.session_state: st.session_state.speak_text = None
 if "speak_id" not in st.session_state: st.session_state.speak_id = 0
 if "history" not in st.session_state: st.session_state.history = []
 if "pending_action" not in st.session_state: st.session_state.pending_action = None
+if "inline_map_messages" not in st.session_state: st.session_state.inline_map_messages = {}
 if "map_center" not in st.session_state: st.session_state.map_center = None
 if "map_zoom" not in st.session_state: st.session_state.map_zoom = 13
 if "last_utility" not in st.session_state: st.session_state.last_utility = None
@@ -180,7 +234,9 @@ if not st.session_state.authenticated:
 
 # ─────────────── Backend ─────────────────────────────────────────────
 @st.cache_resource
-def get_engine(): return EnergyRAG()
+def get_engine(): 
+    # Cache busted again to load new EnergyRAG with regex filter fix!
+    return EnergyRAG()
 
 @st.cache_data
 def load_data_cached(util):
@@ -488,7 +544,8 @@ elif active_tab == tab_labels[1]:
                     location=[m_lat, m_lon], 
                     zoom_start=m_zoom,
                     tiles="OpenStreetMap",
-                    control_scale=True
+                    control_scale=True,
+                    max_zoom=22 # Allow deeper zoom for connection details
                 )
                 
                 # Show Reset Button if focused
@@ -503,6 +560,25 @@ elif active_tab == tab_labels[1]:
                 # Use Marker Cluster for better performance/look with 300+ markers
                 marker_cluster = MarkerCluster().add_to(m)
                 
+                # Add Utility Network Layer Feature
+                geojson_path = os.path.join(os.path.dirname(__file__), "excel_data", "utility_networks.geojson")
+                if os.path.exists(geojson_path):
+                    sparte_active = st.session_state.get("last_utility", "Alle Sparten")
+                    inject_map_animation(m)
+                    folium.GeoJson(
+                        geojson_path,
+                        name="Utility Networks",
+                        style_function=lambda f: get_pipeline_style(f, sparte_active),
+                        marker=folium.CircleMarker(),
+                        tooltip=folium.features.GeoJsonTooltip(
+                            fields=["utility", "type", "risiko", "network", "material", "dimension"],
+                            aliases=["Sparte:", "Typ:", "Risiko:", "Netz:", "Material:", "Dimension:"],
+                            labels=True,
+                            sticky=False
+                        )
+                    ).add_to(m)
+                    folium.LayerControl().add_to(m)
+
                 # Color Mapping
                 FO_COLORS = {"Hoch": "red", "Mittel": "orange", "Niedrig": "green", "Unbekannt": "blue"}
                 
@@ -559,7 +635,7 @@ elif active_tab == tab_labels[1]:
                         ).add_to(m)
                 
                 # Display map inside the c_map column
-                st_folium(m, width="100%", height=700, key="main_network_map")
+                st_folium(m, width="100%", height=700, key="main_network_map", returned_objects=[])
                 
             with c_list:
                 st.markdown(f"#### 📋 Anschluss-Verzeichnis ({len(map_df)})")
@@ -582,7 +658,6 @@ elif active_tab == tab_labels[1]:
                 
                 if event_map and event_map.selection.rows:
                     idx = event_map.selection.rows[0]
-                    # Only rerun if selection actually changed
                     if st.session_state.last_map_idx != idx:
                         row_map = map_df.iloc[idx]
                         if pd.notna(row_map["lat"]) and pd.notna(row_map["lon"]):
@@ -593,7 +668,7 @@ elif active_tab == tab_labels[1]:
                             st.rerun()
         else:
             st.warning("⚠️ **Keine Daten auf Karte anzeigbar.**")
-            st.info("Bitte stellen Sie sicher, dass die Excel-Spalten für Latitude/Longitude ausgefüllt sind und klicken Sie in der Sidebar auf **'🔄 KI-Speicher aktualisieren'**.")
+            st.info("Bitte stellen Sie sicher, dass die Excel-Spalten für Latitude/Longitude ausgefüllt sind.")
 
 elif active_tab == tab_labels[2]:
     with tab_container:
@@ -632,6 +707,22 @@ elif active_tab == tab_labels[3]:
                     status.update(label="⚠️ Keine Daten zur Indizierung gefunden.", state="error")
                     st.warning("Bitte stellen Sie sicher, dass die Excel-Datei Daten enthält und nicht von einem anderen Programm blockiert wird.")
         
+        # --- Action Handler (State Update before Rendering) ---
+        if st.session_state.pending_action:
+            pa = st.session_state.pending_action
+            if pa.get("type") == "navigate_map":
+                # Save map data linked to latest bot message index
+                msg_idx = len(st.session_state.history) - 1
+                st.session_state.inline_map_messages[msg_idx] = {
+                    "lat": pa["args"]["lat"],
+                    "lon": pa["args"]["lon"],
+                    "customer_id": pa["args"]["customer_id"]
+                }
+                st.session_state.pending_action = None
+            elif pa.get("type") == "navigate_map_general":
+                st.session_state.pending_action = None
+                navigate_to(tab_labels[1], "All")
+
         col1, col2 = st.columns([2.5, 1.5])
         
         # Action Buttons Row
@@ -680,51 +771,107 @@ elif active_tab == tab_labels[3]:
                 if not st.session_state.history:
                     st.info("Willkommen! Wählen Sie eine Frage rechts aus oder tippen Sie unten eine eigene Anfrage.")
                 else:
-                    for msg in st.session_state.history:
+                    for i, msg in enumerate(st.session_state.history):
                         div_class = "user-msg" if msg["role"] == "user" else "bot-msg"
                         st.markdown(f'<div class="{div_class}">{msg["content"]}</div>', unsafe_allow_html=True)
+                        # Inline map rendering: show Folium map below the bot message if it has map data
+                        if i in st.session_state.inline_map_messages:
+                            map_data = st.session_state.inline_map_messages[i]
+                            # Try to find the detailed record in the current dataframe
+                            try:
+                                target_id = str(map_data["customer_id"])
+                                match_rows = df[df["Kundennummer"].astype(str) == target_id]
+                                if not match_rows.empty:
+                                    row = match_rows.iloc[0]
+                                    risk_status = str(row["Risiko"])
+                                    risk_color = COLORS.get(risk_status, "#94a3b8")
+                                    
+                                    popup_html = f"""
+                                    <div style="font-family: 'Outfit', sans-serif; min-width: 250px; font-size: 13px;">
+                                        <h4 style="margin: 0 0 10px 0; color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 5px;">
+                                            ⭐ AUSGEWÄHLT: {target_id}
+                                        </h4>
+                                        <table style="width: 100%; border-collapse: collapse;">
+                                            <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
+                                            <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Gemeinde', row.get('Ort', 'Wülfrath'))}</td></tr>
+                                            <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
+                                            <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
+                                            <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
+                                            <tr><td style="padding: 2px 0;"><b>⚠️ Risiko:</b></td><td style="color: {risk_color}; font-weight: bold;">{risk_status}</td></tr>
+                                        </table>
+                                    </div>
+                                    """
+                                else:
+                                    popup_html = f"Kunde {target_id}"
+                            except:
+                                popup_html = f"Kunde {map_data.get('customer_id')}"
+
+                            m = folium.Map(location=[map_data["lat"], map_data["lon"]], zoom_start=20, tiles="OpenStreetMap", max_zoom=22)
+                            inject_map_animation(m)
+                            
+                            geojson_path_chat = os.path.join(os.path.dirname(__file__), "excel_data", "utility_networks.geojson")
+                            if os.path.exists(geojson_path_chat):
+                                folium.GeoJson(
+                                    geojson_path_chat,
+                                    name="Utility Networks",
+                                    style_function=lambda f: get_pipeline_style(f, selected_utility if selected_utility != "Alle Sparten" else "Alle Sparten"),
+                                    marker=folium.CircleMarker(),
+                                    tooltip=folium.features.GeoJsonTooltip(
+                                        fields=["utility", "type", "risiko", "network", "material", "dimension"],
+                                        aliases=["Sparte:", "Typ:", "Risiko:", "Netz:", "Material:", "Dimension:"],
+                                        labels=True, sticky=False
+                                    )
+                                ).add_to(m)
+
+                            folium.Marker(
+                                location=[map_data["lat"], map_data["lon"]],
+                                popup=folium.Popup(popup_html, max_width=350),
+                                tooltip=f"📍 Details anzeigen: {map_data['customer_id']}",
+                                icon=folium.Icon(color='red', icon='star', prefix='fa')
+                            ).add_to(m)
+                            folium_static(m, width=450, height=350)
             
-            # Render confirmation card OUTSIDE the scrollable container so buttons work
-            if st.session_state.pending_action:
+            # Render confirmation cards OUTSIDE the scrollable container
+            if st.session_state.pending_action and st.session_state.pending_action.get("type") == "update_asset":
                 pa = st.session_state.pending_action
                 args = pa["args"]
                 with st.container():
-                    st.markdown(f"""
-                    <div style="background:#fff7ed; border:2px solid #fdba74; padding:15px; border-radius:12px; margin-top:10px;">
-                        <h5 style="margin:0; color:#9a3412;">🛠️ Daten-Aktualisierung bestätigen</h5>
-                        <p style="font-size:13px; margin:8px 0;">Soll folgende Änderung gespeichert werden?</p>
-                        <ul style="font-size:13px; margin:0; padding-left:20px;">
-                            <li><b>Kunde:</b> {args.get('customer_id')}</li>
-                            <li><b>Feld:</b> {args.get('field_name')}</li>
-                            <li><b>Neuer Wert:</b> {args.get('new_value')}</li>
-                            <li><b>Sparte:</b> {args.get('utility')}</li>
-                        </ul>
-                    </div>
-                    """, unsafe_allow_html=True)
-                c1, c2 = st.columns(2)
-                if c1.button("✅ Bestätigen & Speichern", use_container_width=True, type="primary"):
-                    from geo_utils import update_excel_record
-                    success = update_excel_record(
-                        args.get("customer_id"), 
-                        args.get("utility"), 
-                        args.get("field_name"), 
-                        args.get("new_value")
-                    )
-                    if success:
-                        st.success("✅ Daten erfolgreich aktualisiert!")
-                        st.session_state.history.append({"role": "bot", "content": "✅ Die Daten wurden erfolgreich im Excel-System aktualisiert."})
-                        st.session_state.pending_action = None
-                        st.cache_resource.clear()
-                        st.cache_data.clear()
-                        st.rerun()
-                    else:
-                        st.error("Fehler beim Aktualisieren. Prüfen Sie ob die Datei geöffnet ist.")
-                        st.warning(f"Debug: ID={args.get('customer_id')}, Feld={args.get('field_name')}, Sparte={args.get('utility')}")
-                
-                if c2.button("❌ Abbrechen", use_container_width=True):
-                    st.session_state.pending_action = None
-                    st.session_state.history.append({"role": "bot", "content": "Die Aktualisierung wurde abgebrochen."})
-                    st.rerun()
+                        st.markdown(f"""
+                        <div style="background:#fff7ed; border:2px solid #fdba74; padding:15px; border-radius:12px; margin-top:10px;">
+                            <h5 style="margin:0; color:#9a3412;">🛠️ Daten-Aktualisierung bestätigen</h5>
+                            <p style="font-size:13px; margin:8px 0;">Soll folgende Änderung gespeichert werden?</p>
+                            <ul style="font-size:13px; margin:0; padding-left:20px;">
+                                <li><b>Kunde:</b> {args.get('customer_id')}</li>
+                                <li><b>Feld:</b> {args.get('field_name')}</li>
+                                <li><b>Neuer Wert:</b> {args.get('new_value')}</li>
+                                <li><b>Sparte:</b> {args.get('utility')}</li>
+                            </ul>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        c1, c2 = st.columns(2)
+                        if c1.button("✅ Bestätigen & Speichern", use_container_width=True, type="primary"):
+                            from geo_utils import update_excel_record
+                            success = update_excel_record(
+                                args.get("customer_id"), 
+                                args.get("utility"), 
+                                args.get("field_name"), 
+                                args.get("new_value")
+                            )
+                            if success:
+                                st.success("✅ Daten erfolgreich aktualisiert!")
+                                st.session_state.history.append({"role": "bot", "content": "✅ Die Daten wurden erfolgreich im Excel-System aktualisiert."})
+                                st.session_state.pending_action = None
+                                st.cache_resource.clear()
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error("Fehler beim Aktualisieren. Prüfen Sie ob die Datei geöffnet ist.")
+                                st.warning(f"Debug: ID={args.get('customer_id')}, Feld={args.get('field_name')}, Sparte={args.get('utility')}")
+                        
+                        if c2.button("❌ Abbrechen", use_container_width=True):
+                            st.session_state.pending_action = None
+                            st.session_state.history.append({"role": "bot", "content": "Die Aktualisierung wurde abgebrochen."})
+                            st.rerun()
         # Floating Voice Input & Stop Button
         with st.container():
             st.markdown('<div style="position:fixed; bottom:75px; right:70px; font-size:10px; color:#64748b; z-index:1001;">Click to Talk</div>', unsafe_allow_html=True)
@@ -772,7 +919,7 @@ elif active_tab == tab_labels[3]:
                         transcription = res_voice["text"]
                         st.session_state.history.append({"role": "user", "content": transcription})
                         with st.spinner("KI verarbeitet Sprachbefehl..."):
-                            res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None)
+                            res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None, history=st.session_state.history)
                             st.session_state.history.append({"role": "bot", "content": res["answer"]})
                             st.session_state.speak_text = res["answer"]
                             st.session_state.speak_id += 1
@@ -782,7 +929,7 @@ elif active_tab == tab_labels[3]:
                     elif isinstance(res_voice, str): # Legacy compatibility if cache is stuck
                         transcription = res_voice
                         st.session_state.history.append({"role": "user", "content": transcription})
-                        res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None)
+                        res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None, history=st.session_state.history)
                         st.session_state.history.append({"role": "bot", "content": res["answer"]})
                         st.session_state.speak_text = res["answer"]
                         st.session_state.speak_id += 1
@@ -797,7 +944,7 @@ elif active_tab == tab_labels[3]:
         if user_p := st.chat_input("Fragen Sie den KI-Assistenten nach Materialien, Risiken oder Objekt-Details..."):
             st.session_state.history.append({"role": "user", "content": user_p})
             with st.spinner("KI verarbeitet Anfrage..."):
-                res = engine.answer_question(user_p, utility=selected_utility if selected_utility != "Alle Sparten" else None)
+                res = engine.answer_question(user_p, utility=selected_utility if selected_utility != "Alle Sparten" else None, history=st.session_state.history)
                 st.session_state.history.append({"role": "bot", "content": res["answer"]})
                 st.session_state.speak_text = res["answer"]
                 st.session_state.speak_id += 1
