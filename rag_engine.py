@@ -46,7 +46,7 @@ def _safe(v: Any) -> str:
     return "" if pd.isna(v) else str(v)
 
 def row_to_paragraph(row: Dict[str, Any], utility: str = "") -> str:
-    general_keys = ["Gemeinde", "Ortsteil", "Straße", "Hausnummer", "Zusatz", "Objekt-ID_Global"]
+    general_keys = ["Gemeinde", "Postleitzahl", "Straße", "Hausnummer", "Zusatz", "Objekt-ID_Global"]
     util_specific = {k: v for k, v in row.items() if k not in general_keys and k != "Sparte"}
     parts = []
     if utility: parts.append(f"VERSORGUNGSART: {utility}")
@@ -88,6 +88,9 @@ class VectorStore:
 
 class Embedder:
     def __init__(self, model_name: str = EMBED_MODEL_NAME):
+        import os
+        os.environ["TQDM_DISABLE"] = "1"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         self.model = SentenceTransformer(model_name)
     def embed(self, texts: List[str], batch_size: int = 64) -> List[List[float]]:
         return self.model.encode(texts, batch_size=batch_size, show_progress_bar=False).tolist()
@@ -149,7 +152,11 @@ class EnergyRAG:
                 if not para: continue
                 docs.append(para)
                 ids.append(row_id)
-                metas.append({"utility": util, "id": str(row.get("Kundennummer", ""))})
+                metas.append({
+                    "utility": util, 
+                    "id": str(row.get("Kundennummer", "")),
+                    "name": str(row.get("Kundenname", ""))
+                })
             if docs:
                 embeddings = self.embedder.embed(docs)
                 self.vs.add(ids=ids, embeddings=embeddings, metadatas=metas, documents=docs)
@@ -196,7 +203,6 @@ class EnergyRAG:
             # Smart Sparten Filter (Optional)
             target_sparte = None
             if "gas" in ql: target_sparte = "Gas"
-            elif "strom" in ql: target_sparte = "Strom"
             elif "wasser" in ql: target_sparte = "Wasser"
             
             if target_sparte:
@@ -221,7 +227,7 @@ class EnergyRAG:
                 
                 if any(x in ql for x in ["strasse", "straße", "hausnummer", "address", "location"]):
                     lines.append(f"📍 **Adresse:** {res.get('Straße', 'n/a')} {res.get('Hausnummer', '')}")
-                    lines.append(f"🏙️ **Ort:** {res.get('Ortsteil', '')} {res.get('Gemeinde', '')}")
+                    lines.append(f"🏙️ **Ort:** {res.get('Postleitzahl', '')} {res.get('Gemeinde', '')}")
 
                 if any(x in ql for x in ["alter", "age", "year", "einbau"]):
                     lines.append(f"⏳ **Alter:** {int(res.get('Alter', 0))} Jahre (Einbau: {res.get('Einbaujahr', 'unbekannt')})")
@@ -250,11 +256,16 @@ class EnergyRAG:
                     else:
                         return {"answer": f"⚠️ Der Kunde `{sid}` wurde gefunden, hat aber leider keine Koordinaten für die Karte.", "hits": [], "model_used": "Navigation-Engine-v1", "switched": True}
 
-                return {"answer": "\n".join(lines), "hits": [], "model_used": "Direct-ID-Engine-v2", "switched": True}
+                # ── Only attach download_data if specifically requested (Strict Keywords) ──
+                dl_requested = any(x in ql for x in ["excel", "csv", "tabelle", "table", "format", "tabular"])
+                resp = {"answer": "\n".join(lines), "hits": [], "model_used": "Direct-ID-Engine-v2", "switched": True}
+                if dl_requested:
+                    resp["download_data"] = matches.to_csv(index=False).encode('utf-8-sig')
+                return resp
 
         # 2. Greetings (Fixed for False Positives like "whicH I...")
         if ql.strip() in ["hi", "hallo", "hello", "guten tag", "hey"]:
-            return {"answer": "Guten Tag! Ich bin das ESC Infrastructure Intelligence System. Wie kann ich Ihnen heute bei der Analyse Ihrer Gas-, Strom- oder Wasser-Anschlussdaten helfen?", "hits": [], "model_used": "System", "switched": False}
+            return {"answer": "Guten Tag! Ich bin das ESC Infrastructure Intelligence System. Wie kann ich Ihnen heute bei der Analyse Ihrer Gas- oder Wasser-Anschlussdaten helfen?", "hits": [], "model_used": "System", "switched": False}
 
         # 3. Analytical Trends (Materials over time)
         if any(x in ql for x in ["material", "werkstoff", "anschlussart"]) and any(x in ql for x in ["wann", "verbaut", "historisch", "zeitraum"]):
@@ -269,7 +280,7 @@ class EnergyRAG:
                     top = mats[mats > 0].sort_values(ascending=False)
                     mat_str = ", ".join([f"{m} ({q})" for m, q in top.items()])
                     lines.append(f"- **{int(decade)}er Jahre**: {mat_str}")
-                return {"answer": "\n".join(lines), "hits": [], "model_used": "History-Engine", "switched": True}
+                return {"answer": "\n".join(lines), "hits": [], "model_used": "History-Engine", "switched": True, "download_data": summary.to_csv().encode('utf-8-sig')}
             except: pass
 
         # 4. Numeric Filters
@@ -282,18 +293,91 @@ class EnergyRAG:
                     lines = [f"📊 **Analyse: {len(matches)} Objekte > {threshold} Jahre**", "Top Treffer:", ""]
                     for _, r in matches.head(5).iterrows():
                         lines.append(f"- {r['Sparte']} ({r['Kundennummer']}): {r['Straße']} | **{int(r['Alter'])} J.**")
-                    return {"answer": "\n".join(lines), "hits": [], "model_used": "Filter-Engine", "switched": True}
+                    # ── Only attach download_data if specifically requested (Strict Keywords) ──
+                    dl_requested = any(x in ql for x in ["excel", "csv", "tabelle", "table", "format", "tabular"])
+                    resp = {"answer": "\n".join(lines), "hits": [], "model_used": "Filter-Engine", "switched": True}
+                    if dl_requested:
+                        resp["download_data"] = matches.to_csv(index=False).encode('utf-8-sig')
+                    return resp
             except: pass
 
-        # 5. General Map Navigation
-        if any(x in ql for x in ["karte", "map", "landkarte", "netz-karte", "zeige", "view", "show", "öffne", "open"]) and not id_match:
+        # 5. Full Table / Listing (Catch queries like "all wasser connections")
+        table_keywords = ["liste", "tabelle", "alle", "list", "table", "all", "übersicht", "total", "excel", "csv", "daten", "format"]
+        if any(x in ql for x in table_keywords):
+            target_sparte = None
+            if "gas" in ql: target_sparte = "Gas"
+            elif "wasser" in ql: target_sparte = "Wasser"
+            
+            df = self.unified_df.copy()
+            if target_sparte:
+                # Use str.contains with case-insensitivity to be resilient
+                df = df[df["Sparte"].astype(str).str.contains(target_sparte, case=False, na=False)]
+            
+            # --- Smart NLP Filters for Tables ---
+            # 1. Risk Filter
+            if any(x in ql for x in ["high risk", "hohes risiko", "risiko hoch", "hoch"]):
+                df = df[df["Risiko"] == "Hoch"]
+            elif any(x in ql for x in ["medium", "mittel", "mittleres risiko"]):
+                df = df[df["Risiko"] == "Mittel"]
+            elif any(x in ql for x in ["low", "niedrig", "gering"]):
+                df = df[df["Risiko"] == "Niedrig"]
+                
+            # 2. Address Filter
+            unique_streets = [str(s) for s in df["Straße"].dropna().unique() if len(str(s)) > 3]
+            matched_streets = [s for s in unique_streets if s.lower() in ql]
+            if matched_streets:
+                best_street = max(matched_streets, key=lambda x: len(x))
+                df = df[df["Straße"] == best_street]
+                
+                # Check for Hausnummer
+                hn_match = re.search(r'\b\d{1,4}[a-zA-Z]?\b', ql.replace(best_street.lower(), ''))
+                if hn_match:
+                    num = hn_match.group()
+                    df = df[df["Hausnummer"].astype(str).str.lower() == num.lower()]
+
+            if target_sparte:
+                answer = f"✅ **{target_sparte}-Übersicht**: Ich habe {len(df)} Anschlüsse gefunden."
+            else:
+                answer = f"✅ **Gesamtübersicht**: Ich habe {len(df)} Anschlüsse gefunden."
+            
+            if not df.empty:
+                # Generate a clean Markdown table for preview (top 15)
+                # Reorder columns to show Kundenname first
+                cols = ["Kundenname", "Kundennummer", "Sparte", "Straße", "Hausnummer", "Risiko", "Alter"]
+                available_cols = [c for c in cols if c in df.columns]
+                preview_df = df[available_cols].head(15)
+                table_md = preview_df.to_markdown(index=False)
+                
+                # ── Only attach download_data if specifically requested (Strict Keywords) ──
+                dl_requested = any(x in ql for x in ["excel", "csv", "tabelle", "table", "format", "tabular"])
+                
+                resp = {
+                    "answer": f"{answer}\n\n{table_md}\n\n*(Oben sehen Sie die ersten 15 Zeilen. Nutzen Sie den Button unten für den vollständigen Export als CSV)*",
+                    "hits": [],
+                    "model_used": "Full-Table-Engine",
+                    "switched": True
+                }
+                if dl_requested:
+                    resp["download_data"] = df.to_csv(index=False).encode('utf-8-sig')
+                return resp
+            else:
+                return {
+                    "answer": f"📊 **Tabelle**: Ich konnte leider keine Daten für '{target_sparte or 'Gesamt'}' finden, die Ihrer Anfrage entsprechen.",
+                    "hits": [],
+                    "model_used": "Full-Table-Engine",
+                    "switched": True
+                }
+
+        # 6. General Map Navigation (Only triggers if NO table keywords are present)
+        map_keywords = ["karte", "map", "landkarte", "netz-karte", "zeige", "view", "show", "öffne", "open"]
+        if any(x in ql for x in map_keywords) and not id_match and not any(x in ql for x in table_keywords):
              return {
-                "answer": "🗺️ **Ich öffne die Netz-Karte für Sie...**",
+                "answer": "🗺️ **Ich erstelle die Netz-Karte direkt hier im Chat...**",
                 "hits": [],
                 "model_used": "Navigation-Engine-v1",
                 "switched": True,
-                "pending_action": {"type": "navigate_map_general", "args": {}}
-            }
+                "pending_action": {"type": "navigate_map_general", "args": {"filter": target_sparte or "All"}}
+             }
 
         return None
 
@@ -349,7 +433,7 @@ class EnergyRAG:
                                     "customer_id": {"type": "string", "description": "Customer ID, e.g. '3' or 'Kunde 3'."},
                                     "field_name": {"type": "string", "description": "Column to update, e.g. Hausnummer, Schutzrohr, Werkstoff, Installateur Name, Gemeinde, Gestattungsvertrag, etc."},
                                     "new_value": {"type": "string", "description": "New value to write."},
-                                    "utility": {"type": "string", "enum": ["Gas", "Wasser", "Strom", "Gemeinsam"], "description": "Utility sector. Use Gemeinsam for shared fields."}
+                                    "utility": {"type": "string", "enum": ["Gas", "Wasser", "Gemeinsam"], "description": "Utility sector. Use Gemeinsam for shared fields."}
                                 },
                                 "required": ["customer_id", "field_name", "new_value", "utility"]
                             }

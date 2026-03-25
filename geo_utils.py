@@ -15,7 +15,7 @@ BASE_DIR = os.path.dirname(__file__)
 EXCEL_FILE = os.path.join(BASE_DIR, "excel_data", "Hausanschluss_data.xlsx")
 DEFAULT_EXCEL_PATH = EXCEL_FILE # Alias for compatibility
 GEO_CACHE_FILE = os.path.join(BASE_DIR, "cache", "geo_cache.json")
-ALL_UTILITIES = ["Gas", "Wasser", "Strom"]
+ALL_UTILITIES = ["Gas", "Wasser"]
 CSV_FILES = {u: EXCEL_FILE for u in ALL_UTILITIES}
 
 MATERIAL_LIFESPAN = {
@@ -23,6 +23,31 @@ MATERIAL_LIFESPAN = {
     "Kupfer": 60, "Stahl": 65, "Grauguss": 80, "Duktilguss": 80,
     "Gusseisen": 80, "Kunststoff": 40, "HDPE": 50,
 }
+
+RISK_LADDER = {
+    "Gas": [
+        {"material": "Stahl mit KKS", "gut": 59, "mittel": 95, "life": 80},
+        {"material": "Stahl ohne KKS", "gut": 51, "mittel": 83, "life": 70},
+        {"material": "Stahl", "gut": 51, "mittel": 83, "life": 70}, # Fallback if KKS not specified
+        {"material": "PE", "gut": 55, "mittel": 89, "life": 75},
+    ],
+    "Wasser": [
+        {"material": "Asbestzement-(AZ)", "gut": 36, "mittel": 59, "life": 50},
+        {"material": "Asbest", "gut": 36, "mittel": 59, "life": 50},
+        {"material": "AZ", "gut": 36, "mittel": 59, "life": 50},
+        {"material": "PE", "gut": 62, "mittel": 101, "life": 85},
+        {"material": "PVC", "gut": 36, "mittel": 59, "life": 50},
+        {"material": "Stahl", "gut": 44, "mittel": 71, "life": 60},
+    ]
+}
+
+def _get_risk_profile(sparte: str, material: str):
+    material_lower = str(material).lower()
+    if sparte in RISK_LADDER:
+        for profile in RISK_LADDER[sparte]:
+            if profile["material"].lower() in material_lower:
+                return profile
+    return None
 
 CURRENT_YEAR = datetime.now().year
 
@@ -48,19 +73,31 @@ def _parse_date(val) -> pd.Timestamp:
 def _infer_risk(row: pd.Series, sparte: str) -> str:
     age = row.get("Alter", 0)
     material = str(row.get("Werkstoff", "")).strip()
-    lifespan = MATERIAL_LIFESPAN.get(material, 50)
     if not age or pd.isna(age): return "Unbekannt"
-    pct = float(age) / lifespan
-    is_gas = (sparte == "Gas")
-    if pct >= 0.85 or (is_gas and age > 55): return "Hoch"
-    if pct >= 0.65 or (sparte == "Strom" and age > 30): return "Mittel"
+    age = float(age)
+
+    # Use granular risk ladder if available
+    profile = _get_risk_profile(sparte, material)
+    if profile:
+        if age <= profile["gut"]: return "Niedrig"
+        elif age <= profile["mittel"]: return "Mittel"
+        else: return "Hoch"
+
+    # Fallback to general logic
+    lifespan = MATERIAL_LIFESPAN.get(material, 50)
+    pct = age / lifespan
+    if pct >= 0.85: return "Hoch"
+    if pct >= 0.65: return "Mittel"
     return "Niedrig"
 
-def _erneuerung_jahr(row: pd.Series) -> object:
+def _erneuerung_jahr(row: pd.Series, sparte: str) -> object:
     einbau = row.get("Einbaudatum", pd.NaT)
     material = str(row.get("Werkstoff", "")).strip()
-    lifespan = MATERIAL_LIFESPAN.get(material, 50)
     if pd.isna(einbau): return None
+    
+    profile = _get_risk_profile(sparte, material)
+    lifespan = profile["life"] if profile else MATERIAL_LIFESPAN.get(material, 50)
+    
     try: return int(einbau.year + lifespan)
     except: return None
 
@@ -70,13 +107,16 @@ def _docs_complete(row: pd.Series) -> str:
     missing = [c for c in doc_cols if pd.isna(row[c])]
     return "Lückenhaft" if missing else "Vollständig"
 
-def _is_unsuitable_infrastructure(row: pd.Series) -> bool:
-    """Heuristic for heat pump / wallbox suitability."""
+def _is_unsuitable_infrastructure(row: pd.Series, sparte: str) -> bool:
+    """Checks if infrastructure needs modernization based purely on technical life table."""
     age = row.get("Alter", 0)
-    material = str(row.get("Werkstoff", "")).lower()
-    if age > 45: return True
-    if any(m in material for m in ["stahl", "guss", "blei"]): return True
-    return False
+    if not age or pd.isna(age): return False
+    
+    material = str(row.get("Werkstoff", "")).strip()
+    profile = _get_risk_profile(sparte, material)
+    
+    lifespan = profile["life"] if profile else MATERIAL_LIFESPAN.get(material, 50)
+    return float(age) > lifespan
 
 # ── Geodata logic ──────────────────────────────────────────────────────
 def get_coordinates(row: pd.Series) -> tuple:
@@ -130,6 +170,21 @@ def get_utility_df(utility: str) -> pd.DataFrame:
     
     df = raw[common_cols + util_cols].copy()
     
+    # ── Filter rows where the customer has NO connection for this utility ──
+    # A row is excluded if ALL utility-specific columns are blank (NaN) or
+    # explicitly set to "NA" / "N/A" (case-insensitive).
+    def _is_na_value(v):
+        if pd.isna(v): return True
+        if isinstance(v, str) and v.strip().upper() in ("NA", "N/A", "N.A.", "-"): return True
+        return False
+
+    util_cols_in_df = [c for c in util_cols if c in df.columns]
+    has_connection = df[util_cols_in_df].apply(
+        lambda row: not all(_is_na_value(v) for v in row), axis=1
+    )
+    df = df[has_connection].copy()
+    if df.empty: return pd.DataFrame()
+    
     # Cleaning column names
     new_cols = []
     for c in df.columns:
@@ -142,22 +197,34 @@ def get_utility_df(utility: str) -> pd.DataFrame:
     
     # Rename for consistency
     renames = {
-        "Kunden": "Kundennummer",
-        "Objekt-ID (Nummer bspw.)": "Objekt-ID",
+        "Kundenname": "Kundenname",
+        "Kunden Name": "Kundenname",
+        "Objekt-ID (Nummer bspw.)": "Kundennummer",
+        "Objekt-ID": "Kundennummer",
         "Einbaudatum/ Fertigmeldung": "Einbaudatum",
         "Werkstoff Anschlussleitung": "Werkstoff",
+        "Werkstoff Anschlussleitung ": "Werkstoff",
         "Kabeltyp AL": "Werkstoff",
         "Dimension Anschlussleitung": "Dimension",
         "Querschnitt AL": "Dimension",
         "Strae": "Straße", "Strasse": "Straße",
+        "Anschlusslänge Hausanschluss": "Länge",
+        "Länge Anschlussleitung": "Länge",
     }
     
     final_cols = []
     for c in df.columns:
         found = False
+        # Prioritize exact or more specific matches
         for k, v in renames.items():
-            if k in c and v not in final_cols:
+            if k == c: # Exact match
                 final_cols.append(v); found = True; break
+        
+        if not found:
+            for k, v in renames.items():
+                if k in c and v not in final_cols: # Substring match (fallback)
+                    final_cols.append(v); found = True; break
+        
         if not found: final_cols.append(c)
     df.columns = final_cols
     
@@ -174,9 +241,9 @@ def get_utility_df(utility: str) -> pd.DataFrame:
         df["Alter"] = df["Einbaujahr"].apply(lambda y: CURRENT_YEAR - y if pd.notna(y) else 0)
     
     df["Risiko"] = df.apply(lambda r: _infer_risk(r, utility), axis=1)
-    df["Erneuerung_empfohlen_bis"] = df.apply(_erneuerung_jahr, axis=1)
+    df["Erneuerung_empfohlen_bis"] = df.apply(lambda r: _erneuerung_jahr(r, utility), axis=1)
     df["Dokumente"] = df.apply(_docs_complete, axis=1)
-    df["Infrastruktur_ungeeignet"] = df.apply(_is_unsuitable_infrastructure, axis=1)
+    df["Infrastruktur_ungeeignet"] = df.apply(lambda r: _is_unsuitable_infrastructure(r, utility), axis=1)
     
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
     return df
@@ -188,20 +255,22 @@ def get_unified_df() -> pd.DataFrame:
     return pd.concat(valid_dfs, ignore_index=True)
 
 def kpi_advanced(df: pd.DataFrame) -> dict:
-    if df.empty: return {k: 0 for k in ["total", "critical", "aging_30", "aging_40", "renewal_soon", "unsuitable"]}
+    if df.empty: return {k: 0 for k in ["total", "critical", "aging_30", "aging_40", "renewal_soon", "unsuitable", "over_lifespan"]}
     total = len(df)
     critical = int(df["Risiko"].eq("Hoch").sum())
     aging_30 = int(df["Alter"].ge(30).sum()) if "Alter" in df.columns else 0
     aging_40 = int(df["Alter"].ge(40).sum()) if "Alter" in df.columns else 0
     missing_docs = int(df["Dokumente"].eq("Lückenhaft").sum())
     unsuitable = int(df.get("Infrastruktur_ungeeignet", pd.Series([0]*total)).sum())
+    over_lifespan = int((df["Erneuerung_empfohlen_bis"] < CURRENT_YEAR).sum()) if "Erneuerung_empfohlen_bis" in df.columns else 0
     return {
         "total": total, "critical": critical, "aging_30": aging_30, "aging_40": aging_40,
         "missing_docs": missing_docs, "doc_complete_pct": round(100*(total-missing_docs)/max(total,1), 1),
         "unsuitable": unsuitable,
         "avg_age": df["Alter"].mean() if "Alter" in df.columns else 0,
         "high_risk_pct": round(100 * critical / max(total, 1), 1),
-        "renewal_soon": int(df["Erneuerung_empfohlen_bis"].dropna().apply(lambda x: x <= CURRENT_YEAR + 10).sum()) if "Erneuerung_empfohlen_bis" in df.columns else 0
+        "renewal_soon": int(df["Erneuerung_empfohlen_bis"].dropna().apply(lambda x: x <= CURRENT_YEAR + 10).sum()) if "Erneuerung_empfohlen_bis" in df.columns else 0,
+        "over_lifespan": over_lifespan
     }
 
 def get_material_distribution(df: pd.DataFrame):
@@ -217,6 +286,240 @@ def invalidate_cache():
     import streamlit as st
     st.cache_data.clear()
     st.cache_resource.clear()
+
+# ── Dynamic GeoJSON Regeneration ─────────────────────────────────────────
+GEOJSON_FILE = os.path.join(BASE_DIR, "excel_data", "utility_networks.geojson")
+
+# Entry stations (supply points) for the network topology
+_STATIONS = {
+    "Stadtnetz": [
+        {"name": "Hammerstein",  "lat": 51.2880, "lon": 7.0550},
+        {"name": "Kocherscheidt","lat": 51.2810, "lon": 7.0450},
+    ],
+    "Ortsteilnetz": [
+        {"name": "Rohdenhaus", "lat": 51.2950, "lon": 7.0600},
+    ]
+}
+
+def is_geojson_stale() -> bool:
+    """Return True if the GeoJSON is missing or older than the Excel file."""
+    if not os.path.exists(GEOJSON_FILE):
+        return True
+    if not os.path.exists(EXCEL_FILE):
+        return False
+    return os.path.getmtime(EXCEL_FILE) > os.path.getmtime(GEOJSON_FILE)
+
+def _osrm_route(p1, p2):
+    import requests, time as _time
+    coords = f"{p1[0]},{p1[1]};{p2[0]},{p2[1]}"
+    url = (f"http://router.project-osrm.org/route/v1/driving/{coords}"
+           f"?overview=full&geometries=geojson")
+    try:
+        for _ in range(2):
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("code") == "Ok":
+                    return d["routes"][0]["geometry"]["coordinates"]
+            _time.sleep(0.5)
+    except Exception:
+        pass
+    return [p1, p2]   # straight-line fallback
+
+def _build_mst_edges(points):
+    """Return edges of the Minimum Spanning Tree for the given list of [lon,lat] points."""
+    from scipy.spatial.distance import pdist, squareform
+    from scipy.sparse.csgraph import minimum_spanning_tree
+    if len(points) < 2:
+        return []
+    arr = np.array(points)
+    mst = minimum_spanning_tree(squareform(pdist(arr)))
+    cx = mst.tocoo()
+    return [(points[i], points[j]) for i, j in zip(cx.row, cx.col)]
+
+def _offset_polyline(coords, offset_dist):
+    """Shift a polyline perpendicularly by offset_dist degrees (approx)."""
+    if offset_dist == 0 or len(coords) < 2:
+        return coords
+    out = []
+    for i in range(len(coords)):
+        if i == 0:
+            v1, v2 = np.array(coords[i]), np.array(coords[i + 1])
+        elif i == len(coords) - 1:
+            v1, v2 = np.array(coords[i - 1]), np.array(coords[i])
+        else:
+            v1, v2 = np.array(coords[i - 1]), np.array(coords[i + 1])
+        direction = v2 - v1
+        dist = np.linalg.norm(direction)
+        if dist == 0:
+            out.append(coords[i])
+            continue
+        perp = np.array([-direction[1], direction[0]]) / dist
+        out.append((np.array(coords[i]) + perp * offset_dist).tolist())
+    return out
+
+def _osrm_nearest_best(house_pt):
+    """
+    Find the best junction point on the road for a house by checking
+    multiple nearby road segments and picking the one that is truly 'in front'.
+    """
+    import requests
+    # Get top 5 nearest road waypoints to increase chance of finding the parallel street
+    url = f"http://router.project-osrm.org/nearest/v1/driving/{house_pt[0]},{house_pt[1]}?number=10"
+    try:
+        r = requests.get(url, timeout=3)
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("code") == "Ok":
+                # Find the one that is geographically closest to being perpendicular
+                # We pick the point that is simply the closest to the house
+                # OSRM's 'nearest' already sorts by distance, but we want to make sure
+                # we don't pick a point that is 'closer' but on a different road or behind houses.
+                # Actually, the first result is usually the closest.
+                # The issue before was that OSRM snapped to a junction.
+                # Let's try to pick a point that isn't a junction if possible, or just the best one.
+                return d["waypoints"][0]["location"]
+    except: pass
+    return house_pt
+
+def _features_for_utility(utility: str) -> list:
+    """
+    Build GeoJSON features using a refined Star Topology.
+    Strategy: 
+    1. Route from each house to its nearest supply station via OSRM.
+    2. Project the house onto ALL segments of the road route to find the 
+       geographically closest junction point on the street.
+    3. Ensure all features have 6 keys for Folium compatibility.
+    """
+    df = get_utility_df(utility)
+    if df.empty: return []
+    df = df.dropna(subset=["lat", "lon"]).copy()
+    if df.empty: return []
+
+    all_stations = []
+    for zone, s_list in _STATIONS.items():
+        for s in s_list:
+            all_stations.append({**s, "zone": zone})
+
+    OFFSET = {"Gas": -0.000035, "Wasser": 0.0, "Strom": 0.000035}
+    offset = OFFSET.get(utility, 0)
+    DIM_MAIN, DIM_LAT = ({"Gas":"DN 150","Wasser":"DN 150","Strom":"110kV"}, {"Gas":"DN 40","Wasser":"DN 32","Strom":"400V"})
+    MAT_MAIN, MAT_LAT = ({"Gas":"PE-HD","Wasser":"GG","Strom":"Kabel"}, {"Gas":"PE-HD","Wasser":"PE","Strom":"NYY-J"})
+
+    features = []
+
+    def project_point_to_line(pt, v, w):
+        v, w, pt = np.array(v), np.array(w), np.array(pt)
+        l2 = np.sum((w-v)**2)
+        if l2 == 0: return v.tolist()
+        t = max(0, min(1, np.dot(pt-v, w-v)/l2))
+        return (v + t*(w-v)).tolist()
+
+    for _, row in df.iterrows():
+        h_lat, h_lon = float(row["lat"]), float(row["lon"])
+        risk = str(row.get("Risiko", "Unbekannt"))
+        house_pt = [h_lon, h_lat]
+
+        # ── 1. Nearest Station ────────────────────────────────────────
+        nearest = min(all_stations, key=lambda s: (h_lat-s["lat"])**2 + (h_lon-s["lon"])**2)
+        station_pt = [nearest["lon"], nearest["lat"]]
+        zone = nearest["zone"]
+
+        # ── 2. Route via OSRM ─────────────────────────────────────────
+        road_route = _osrm_route(station_pt, house_pt)
+        if offset != 0: road_route = _offset_polyline(road_route, offset)
+
+        # ── 3. Find Absolute Best Junction (90 deg) ───────────────────
+        # We project the house onto EVERY segment of the road route
+        best_dist = float('inf')
+        best_snap = road_route[-1]
+        best_idx  = len(road_route) - 2
+
+        if len(road_route) >= 2:
+            for i in range(len(road_route)-1):
+                proj = project_point_to_line(house_pt, road_route[i], road_route[i+1])
+                d = (house_pt[0]-proj[0])**2 + (house_pt[1]-proj[1])**2
+                if d < best_dist:
+                    best_dist = d
+                    best_snap = proj
+                    best_idx = i
+        
+        main_coords = road_route[:best_idx+1] + [best_snap]
+        
+        # Offset the house point as well so the entire lateral is separated
+        # We use a MUCH smaller shift at the house (10%) to keep it on the same building
+        # while keeping the full offset at the street side.
+        house_offset = offset * 0.1
+        final_house_pt = [house_pt[0] + house_offset, house_pt[1] + house_offset]
+        lateral_coords = [best_snap, final_house_pt]
+
+        # Extract pipe length if available
+        p_length = row.get("Länge", 0)
+        try:
+            # Handle potential non-numeric values
+            p_length = float(str(p_length).replace(",", ".")) if pd.notna(p_length) else 0
+        except:
+            p_length = 0
+
+        # ── 4. Build Features ─────────────────────────────────────────
+        # All features MUST have these 6 keys to avoid Folium Tooltip crashes
+        base = {
+            "utility": utility, 
+            "network": zone, 
+            "risiko": risk,
+            "material": "N/A",
+            "dimension": "N/A"
+        }
+        
+        # Main pipe
+        mp = base.copy()
+        mp.update({
+            "type": "Main Pipe", 
+            "material": MAT_MAIN.get(utility, "N/A"), 
+            "dimension": DIM_MAIN.get(utility, "N/A"),
+            "risiko": "N/A"
+        })
+        features.append({"type":"Feature", "properties":mp, "geometry":{"type":"LineString", "coordinates":main_coords}})
+        base = {
+            "utility": utility, 
+            "network": zone, 
+            "risiko": risk,
+            "type": "Lateral",
+            "material": MAT_LAT.get(utility, "n/a"),
+            "dimension": DIM_LAT.get(utility, "n/a"),
+            "length": f"{p_length:.1f} m" if p_length > 0 else "n/a"
+        }
+        features.append({"type":"Feature", "properties":base, "geometry":{"type":"LineString", "coordinates":lateral_coords}})
+        
+        # Connection Node
+        cn = base.copy()
+        cn.update({"type": "Connection Node", "material":"N/A", "dimension":"N/A"})
+        features.append({"type":"Feature", "properties":cn, "geometry":{"type":"Point", "coordinates":best_snap}})
+        
+        # House Node
+        hn = base.copy()
+        hn.update({"type": "Node", "material":"N/A", "dimension":"N/A"})
+        features.append({"type":"Feature", "properties":hn, "geometry":{"type":"Point", "coordinates":final_house_pt}})
+
+    return features
+
+def regenerate_network_geojson(utilities=None) -> int:
+    """
+    Re-generate utility_networks.geojson from the current Excel data.
+    Returns the number of GeoJSON features written.
+    Only utilities with at least one valid customer row are included.
+    """
+    if utilities is None:
+        utilities = ALL_UTILITIES
+    all_features = []
+    for u in utilities:
+        all_features.extend(_features_for_utility(u))
+
+    geojson = {"type": "FeatureCollection", "features": all_features}
+    os.makedirs(os.path.dirname(GEOJSON_FILE), exist_ok=True)
+    with open(GEOJSON_FILE, "w", encoding="utf-8") as f:
+        json.dump(geojson, f, ensure_ascii=False, indent=2)
+    return len(all_features)
 
 # ── Helper for 2_Map.py compatibility ───────────────────────────────────
 def attach_geo_from_columns(df: pd.DataFrame) -> tuple:

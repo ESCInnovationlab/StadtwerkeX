@@ -5,6 +5,31 @@ DEUTSCHE VERSION | Navigierbare KPIs | Split-Schnittstelle (Karte & Liste)
 """
 
 import os
+import sys
+
+# Disable TQDM progress bars to prevent OSError 22 with sys.stderr in Streamlit
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+# Robust workaround: monkeypatch sys.stderr and sys.stdout flush to ignore OSError 22
+if hasattr(sys, 'stderr') and sys.stderr is not None and hasattr(sys.stderr, 'flush'):
+    original_err_flush = sys.stderr.flush
+    def safe_err_flush():
+        try:
+            original_err_flush()
+        except OSError:
+            pass
+    sys.stderr.flush = safe_err_flush
+
+if hasattr(sys, 'stdout') and sys.stdout is not None and hasattr(sys.stdout, 'flush'):
+    original_out_flush = sys.stdout.flush
+    def safe_out_flush():
+        try:
+            original_out_flush()
+        except OSError:
+            pass
+    sys.stdout.flush = safe_out_flush
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -17,7 +42,8 @@ from rag_engine import EnergyRAG
 from geo_utils import (
     ALL_UTILITIES, get_utility_df, get_unified_df,
     kpi_advanced, invalidate_cache, get_material_distribution,
-    get_bundling_potential, CURRENT_YEAR
+    get_bundling_potential, CURRENT_YEAR,
+    regenerate_network_geojson, is_geojson_stale
 )
 import folium
 from streamlit_folium import st_folium, folium_static
@@ -32,9 +58,8 @@ load_dotenv()
 
 # Define Reusable Utils for Networks (Global Scope)
 COLOR_MAP = {
-    "Gas": {"main": "#fbbf24", "lateral": "#fde68a", "node": "#d97706"},
-    "Wasser": {"main": "#3b82f6", "lateral": "#93c5fd", "node": "#1d4ed8"},
-    "Strom": {"main": "#8b5cf6", "lateral": "#c4b5fd", "node": "#6d28d9"}
+    "Gas":    {"main": "#f97316", "lateral": "#fed7aa", "node": "#ea580c"},   # Orange
+    "Wasser": {"main": "#3b82f6", "lateral": "#93c5fd", "node": "#1d4ed8"}    # Blue
 }
 
 def get_pipeline_style(feature, active_utility):
@@ -49,15 +74,20 @@ def get_pipeline_style(feature, active_utility):
     colors = COLOR_MAP.get(futil, {"main": "gray", "lateral": "lightgray", "node": "black"})
     
     if ftype == "Main Pipe":
-        return {"color": colors["main"], "weight": 3, "opacity": 1.0}
+        # Animated energy flow on main pipes: dashArray enables CSS animation
+        return {
+            "color": colors["main"],
+            "weight": 4,
+            "opacity": 0.95,
+            "dashArray": "16 8",        # drives the flow animation
+        }
     elif ftype == "Lateral":
         is_high = (frisk == "Hoch")
-        dash = "10, 10" if is_high else None
         return {
-            "color": colors["lateral"], 
-            "weight": 4 if is_high else 1.5, 
-            "opacity": 1.0,
-            "dashArray": dash
+            "color": colors["lateral"],
+            "weight": 3 if is_high else 2,
+            "opacity": 0.9,
+            "dashArray": "6 4",         # shorter dash for lateral needle
         }
     elif ftype == "Node":
         if frisk == "Hoch":
@@ -65,21 +95,43 @@ def get_pipeline_style(feature, active_utility):
                 "radius": 10,
                 "color": "#ef4444",
                 "fillColor": "#ef4444",
-                "fillOpacity": 1.0, # Increased for visibility
+                "fillOpacity": 1.0,
                 "weight": 2,
                 "className": "high-risk-ping"
             }
-        return {"radius": 4, "color": colors["node"], "fillColor": colors["node"], "fillOpacity": 1, "weight": 1}
+        return {"radius": 5, "color": colors["node"], "fillColor": colors["node"], "fillOpacity": 1, "weight": 1}
+    elif ftype == "Connection Node":
+        # Junction point on the street
+        return {
+            "radius": 4,
+            "color": colors["main"],
+            "fillColor": "white",      # visual "hole" or junction effect
+            "fillOpacity": 1.0,
+            "weight": 2
+        }
     return {"color": colors["main"], "weight": 2}
 
 def inject_map_animation(map_obj):
     from branca.element import Element
     map_obj.get_root().header.add_child(Element("""
     <style>
-    @keyframes dash_flow { to { stroke-dashoffset: -50; } }
-    @keyframes pulse_ping { 0% { stroke-width: 2px; stroke-opacity: 1; } 100% { stroke-width: 15px; stroke-opacity: 0; } }
-    path[stroke-dasharray] { animation: dash_flow 1s linear infinite !important; }
-    .high-risk-ping { animation: pulse_ping 1.5s ease-out infinite !important; }
+    /* Energy flow: dashed pipes animate by moving dashOffset forward */
+    @keyframes energy_flow {
+        0%   { stroke-dashoffset: 48; }
+        100% { stroke-dashoffset: 0;  }
+    }
+    /* Pulsing glow for high-risk nodes */
+    @keyframes pulse_ping {
+        0%   { stroke-width: 2px;  stroke-opacity: 1; }
+        100% { stroke-width: 14px; stroke-opacity: 0; }
+    }
+    /* Apply to ALL paths that carry a dashArray (main pipes + laterals) */
+    path[stroke-dasharray] {
+        animation: energy_flow 1.2s linear infinite !important;
+    }
+    .high-risk-ping {
+        animation: pulse_ping 1.5s ease-out infinite !important;
+    }
     </style>
     """))
 
@@ -189,6 +241,35 @@ html, body, [data-testid="stAppViewContainer"] {
     70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
     100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
+    /* Custom Styling for Chat Markdown Tables */
+    .stChatMessage [data-testid="stMarkdownContainer"] table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 10px 0;
+        font-size: 0.85em;
+        font-family: 'Outfit', sans-serif;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid #e2e8f0;
+    }
+    .stChatMessage [data-testid="stMarkdownContainer"] th {
+        background-color: #f1f5f9;
+        color: #0f172a;
+        text-align: left;
+        padding: 8px 12px;
+        border-bottom: 2px solid #e2e8f0;
+    }
+    .stChatMessage [data-testid="stMarkdownContainer"] td {
+        padding: 6px 12px;
+        border-bottom: 1px solid #f1f5f9;
+        color: #334155;
+    }
+    .stChatMessage [data-testid="stMarkdownContainer"] tr:nth-of-type(even) {
+        background-color: #f8fafc;
+    }
+    .stChatMessage [data-testid="stMarkdownContainer"] tr:hover {
+        background-color: #eff6ff;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -232,10 +313,20 @@ if not st.session_state.authenticated:
         if st.button("Anmelden", use_container_width=True): check_auth(u, p)
     st.stop()
 
+# ─────────────── Auto-update map if Excel changed ─────────────────────
+# Silently regenerate the network GeoJSON on startup if the Excel is newer.
+# This ensures the map always reflects the latest data without needing to
+# manually click "KI-Speicher aktualisieren".
+if is_geojson_stale():
+    try:
+        regenerate_network_geojson()
+    except Exception:
+        pass  # Never block the app from starting due to map regeneration
+
 # ─────────────── Backend ─────────────────────────────────────────────
 @st.cache_resource
 def get_engine(): 
-    # Cache busted again to load new EnergyRAG with regex filter fix!
+    # Cache busted: Fixed table/map conflict and added 'excel/csv/format' priority
     return EnergyRAG()
 
 @st.cache_data
@@ -306,7 +397,14 @@ with st.sidebar:
     st.info(f"Daten im Speicher: {kb_count}")
     
     if st.button("🔄 KI-Speicher aktualisieren", use_container_width=True, type="primary"):
-        with st.spinner("Indiziere Daten..."):
+        with st.spinner("Indiziere Daten & aktualisiere Karte..."):
+            # 1. Rebuild map network GeoJSON from current Excel data
+            try:
+                feat_count = regenerate_network_geojson()
+                st.toast(f"🗺️ Karte aktualisiert ({feat_count} Netzwerk-Features)")
+            except Exception as _e:
+                st.warning(f"Karte konnte nicht aktualisiert werden: {_e}")
+            # 2. Refresh KI knowledge base
             invalidate_cache()
             st.cache_resource.clear()
             st.cache_data.clear()
@@ -326,7 +424,7 @@ if st.session_state.last_utility != selected_utility:
 
 # ─────────────── Dashboard ────────────────────────────────────────────
 kpis, df = load_data_cached(selected_utility)
-COLORS = {"Gas": "#f59e0b", "Wasser": "#3b82f6", "Strom": "#10b981", "Hoch": "#ef4444", "Mittel": "#f59e0b", "Niedrig": "#22c55e", "Unbekannt": "#94a3b8"}
+COLORS = {"Gas": "#f59e0b", "Wasser": "#3b82f6", "Hoch": "#ef4444", "Mittel": "#f59e0b", "Niedrig": "#22c55e", "Unbekannt": "#94a3b8"}
 
 st.markdown('<h1 class="main-header">STADTWERKE X</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Plattform für Infrastruktur-Analyse, Risikomanagement und Lifecycle-Planung.</p>', unsafe_allow_html=True)
@@ -347,12 +445,12 @@ with cols[0]:
 
 # KPI 2: Kritisches Risiko (NAVIGATES TO MAP)
 with cols[1]:
-    st.markdown(f'<div class="metric-card" style="border-color:#ef4444;"><div class="metric-value" style="color:#ef4444;">{kpis["critical"]}</div><div class="metric-label">Kritisches Risiko</div><div class="metric-detail">Sofortiger Handlungsbedarf</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card" style="border-color:#ef4444;"><div class="metric-value" style="color:#ef4444;">{kpis["critical"]}</div><div class="metric-label">Ersatzbedarf (Kritisch)</div><div class="metric-detail">Sofortiger Handlungsbedarf</div></div>', unsafe_allow_html=True)
     if st.button("Auf Karte zeigen", key="nav_crit", use_container_width=True): navigate_to("🗺️ Netz-Karte", "Critical")
 
 # KPI 3: Überalterung
 with cols[2]:
-    st.markdown(f'<div class="metric-card"><div class="metric-value">{kpis["aging_30"]}</div><div class="metric-label">Überalterung</div><div class="metric-detail">> 30 Jahre Nutzungsdauer</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card" style="border-color:#f59e0b;"><div class="metric-value" style="color:#f59e0b;">{kpis.get("over_lifespan", 0)}</div><div class="metric-label">Über Nutzungsdauer</div><div class="metric-detail">Technische Nutzungsdauer erreicht</div></div>', unsafe_allow_html=True)
     if st.button("Lebenszyklus-Details", key="nav_aging", use_container_width=True): navigate_to("🗺️ Netz-Karte", "Aging")
 
 # KPI 4: Infrastruktur
@@ -441,9 +539,14 @@ if active_tab == tab_labels[0]:
             
             if not view_df.empty:
                 # Table displayed using the pre-calculated Netz-Karte
+                cols_to_show = ["Kundenname", "Kundennummer", "Sparte", "Straße", "Hausnummer", "Werkstoff", "Alter", "Risiko", "Einbaujahr", "Netz-Karte", "lat", "lon"]
+                # Filter available columns
+                available_cols = [c for c in cols_to_show if c in view_df.columns]
+                
                 event = st.dataframe(
-                    view_df[["Kundennummer", "Sparte", "Straße", "Hausnummer", "Werkstoff", "Alter", "Risiko", "Einbaujahr", "Netz-Karte", "lat", "lon"]],
+                    view_df[available_cols],
                     column_config={
+                        "Kundenname": st.column_config.TextColumn("Kunde", width="medium"),
                         "Kundennummer": st.column_config.TextColumn("ID", width="small"),
                         "Sparte": st.column_config.TextColumn("Sparte", width="small"),
                         "Straße": st.column_config.TextColumn("Straße"),
@@ -519,7 +622,7 @@ elif active_tab == tab_labels[1]:
         if st.session_state.drilldown_type == "Critical":
             map_df = map_df[map_df["Risiko"] == "Hoch"]
         elif st.session_state.drilldown_type == "Aging":
-            map_df = map_df[map_df["Alter"] >= 30]
+            map_df = map_df[map_df.get("Erneuerung_empfohlen_bis", 2099) < CURRENT_YEAR]
         elif st.session_state.drilldown_type == "Unsuitable":
             map_df = map_df[map_df["Infrastruktur_ungeeignet"] == True]
         
@@ -589,14 +692,17 @@ elif active_tab == tab_labels[1]:
                     cust_id = str(row["Kundennummer"])
                     
                     # Professional Tooltip HTML
+                    name = row.get("Kundenname", cust_id)
                     popup_content = f"""
                     <div style="font-family: 'Outfit', sans-serif; min-width: 220px; font-size: 13px;">
                         <h4 style="margin: 0 0 10px 0; color: #0f172a; border-bottom: 2px solid {color}; padding-bottom: 5px;">
-                            {row['Sparte']} - {cust_id}
+                            {name}
                         </h4>
                         <table style="width: 100%; border-collapse: collapse;">
-                            <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
-                            <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
+                            <tr><td style="padding: 2px 0;"><b>🆔 ID:</b></td><td>{cust_id}</td></tr>
+                            <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
+                            <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Postleitzahl', '')} {row.get('Gemeinde', 'Wülfrath')}</td></tr>
+                            <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
                             <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
                             <tr><td style="padding: 2px 0;"><b>⚠️ Risiko:</b></td><td style="color: {color}; font-weight: bold;">{risk_status}</td></tr>
                         </table>
@@ -612,14 +718,16 @@ elif active_tab == tab_labels[1]:
 
                     # HIGHLIGHT SELECTED CUSTOMER: Add a special red icon outside Cluster
                     if st.session_state.selected_customer_id == cust_id:
+                        name = row.get("Kundenname", cust_id)
                         highlight_popup = f"""
                         <div style="font-family: 'Outfit', sans-serif; min-width: 250px; font-size: 13px;">
                             <h4 style="margin: 0 0 10px 0; color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 5px;">
-                                ⭐ AUSGEWÄHLT: {cust_id}
+                                ⭐ {name}
                             </h4>
                             <table style="width: 100%; border-collapse: collapse;">
+                                <tr><td style="padding: 2px 0;"><b>🆔 ID:</b></td><td>{cust_id}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
-                                <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Gemeinde', row.get('Ort', 'Wülfrath'))}</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Postleitzahl', '')} {row.get('Gemeinde', 'Wülfrath')}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
@@ -639,9 +747,13 @@ elif active_tab == tab_labels[1]:
                 
             with c_list:
                 st.markdown(f"#### 📋 Anschluss-Verzeichnis ({len(map_df)})")
+                cols_map = ["Kundenname", "Kundennummer", "Sparte", "Straße", "Hausnummer", "Risiko", "Alter", "Netz-Karte", "lat", "lon"]
+                available_map_cols = [c for c in cols_map if c in map_df.columns]
+                
                 event_map = st.dataframe(
-                    map_df[["Kundennummer", "Sparte", "Straße", "Hausnummer", "Risiko", "Alter", "Netz-Karte", "lat", "lon"]],
+                    map_df[available_map_cols],
                     column_config={
+                        "Kundenname": st.column_config.TextColumn("Kunde", width="medium"),
                         "Kundennummer": st.column_config.TextColumn("ID", width="small"),
                         "Risiko": st.column_config.SelectboxColumn("Risiko", options=["Hoch", "Mittel", "Niedrig", "Unbekannt"]),
                         "Alter": st.column_config.NumberColumn("Alt.", format="%d J."),
@@ -742,14 +854,13 @@ elif active_tab == tab_labels[3]:
                 "Bei welchen Anschlüssen fehlen wesentliche Dokumente?",
                 "Welche Anschlussarten/Materialien wurden wann verbaut?",
                 "Welche Hausanschlüsse haben erhöhtes Schadensrisiko?",
-                "Zusammenhänge Baujahr, Material & Störungswahrscheinlichkeit?",
                 "Welche Hausanschlüsse sollten bald erneuert werden?",
                 "Welche Erneuerungen lassen sich bündeln?",
                 "Welche Anschlüsse sind für Wärmepumpen/EV ungeeignet?",
                 "Welche Muster fallen in den Hausanschlussakten auf?",
                 "Welches Material hat welche Nutzungsdauer in Jahren?",
                 "Welche Störungen sind an welchen Anschlüssen aufgetreten?",
-                "Nach wie vielen Jahren Erneuerung für Sparte 10/Material?"
+                "Nach wie vielen Jahren Erneuerung für Wasser/PE?"
             ]
             
             with st.container(height=500):
@@ -763,6 +874,8 @@ elif active_tab == tab_labels[3]:
                             st.session_state.speak_id += 1
                             if "pending_action" in res:
                                  st.session_state.pending_action = res["pending_action"]
+                            if "download_data" in res:
+                                 st.session_state.history[-1]["download_data"] = res["download_data"]
                         st.rerun()
 
         with col1:
@@ -774,63 +887,36 @@ elif active_tab == tab_labels[3]:
                     for i, msg in enumerate(st.session_state.history):
                         div_class = "user-msg" if msg["role"] == "user" else "bot-msg"
                         st.markdown(f'<div class="{div_class}">{msg["content"]}</div>', unsafe_allow_html=True)
-                        # Inline map rendering: show Folium map below the bot message if it has map data
-                        if i in st.session_state.inline_map_messages:
-                            map_data = st.session_state.inline_map_messages[i]
-                            # Try to find the detailed record in the current dataframe
-                            try:
-                                target_id = str(map_data["customer_id"])
-                                match_rows = df[df["Kundennummer"].astype(str) == target_id]
-                                if not match_rows.empty:
-                                    row = match_rows.iloc[0]
-                                    risk_status = str(row["Risiko"])
-                                    risk_color = COLORS.get(risk_status, "#94a3b8")
-                                    
-                                    popup_html = f"""
-                                    <div style="font-family: 'Outfit', sans-serif; min-width: 250px; font-size: 13px;">
-                                        <h4 style="margin: 0 0 10px 0; color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 5px;">
-                                            ⭐ AUSGEWÄHLT: {target_id}
-                                        </h4>
-                                        <table style="width: 100%; border-collapse: collapse;">
-                                            <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
-                                            <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Gemeinde', row.get('Ort', 'Wülfrath'))}</td></tr>
-                                            <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
-                                            <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
-                                            <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
-                                            <tr><td style="padding: 2px 0;"><b>⚠️ Risiko:</b></td><td style="color: {risk_color}; font-weight: bold;">{risk_status}</td></tr>
-                                        </table>
-                                    </div>
-                                    """
-                                else:
-                                    popup_html = f"Kunde {target_id}"
-                            except:
-                                popup_html = f"Kunde {map_data.get('customer_id')}"
-
-                            m = folium.Map(location=[map_data["lat"], map_data["lon"]], zoom_start=20, tiles="OpenStreetMap", max_zoom=22)
-                            inject_map_animation(m)
-                            
-                            geojson_path_chat = os.path.join(os.path.dirname(__file__), "excel_data", "utility_networks.geojson")
-                            if os.path.exists(geojson_path_chat):
-                                folium.GeoJson(
-                                    geojson_path_chat,
-                                    name="Utility Networks",
-                                    style_function=lambda f: get_pipeline_style(f, selected_utility if selected_utility != "Alle Sparten" else "Alle Sparten"),
-                                    marker=folium.CircleMarker(),
-                                    tooltip=folium.features.GeoJsonTooltip(
-                                        fields=["utility", "type", "risiko", "network", "material", "dimension"],
-                                        aliases=["Sparte:", "Typ:", "Risiko:", "Netz:", "Material:", "Dimension:"],
-                                        labels=True, sticky=False
-                                    )
-                                ).add_to(m)
-
-                            folium.Marker(
-                                location=[map_data["lat"], map_data["lon"]],
-                                popup=folium.Popup(popup_html, max_width=350),
-                                tooltip=f"📍 Details anzeigen: {map_data['customer_id']}",
-                                icon=folium.Icon(color='red', icon='star', prefix='fa')
-                            ).add_to(m)
-                            folium_static(m, width=450, height=350)
-            
+                        
+                        if "download_data" in msg:
+                            # Use Base64 encoded link to bypass browser GUID naming issues
+                            import base64
+                            b64 = base64.b64encode(msg["download_data"]).decode()
+                            filename = "energiedaten_export.csv"
+                            href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" class="download-link">📥 Daten herunterladen (Excel/CSV)</a>'
+                            st.markdown(f"""
+                                <style>
+                                .download-link {{
+                                    display: inline-block;
+                                    padding: 8px 16px;
+                                    background-color: #3b82f6;
+                                    color: white !important;
+                                    text-decoration: none;
+                                    border-radius: 8px;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    margin-top: 8px;
+                                    border: 1px solid #2563eb;
+                                    transition: background 0.2s;
+                                }}
+                                .download-link:hover {{
+                                    background-color: #2563eb;
+                                }}
+                                </style>
+                                {href}
+                            """, unsafe_allow_html=True)
+                        
+                        # (Removed inline map rendering as per revert request)
             # Render confirmation cards OUTSIDE the scrollable container
             if st.session_state.pending_action and st.session_state.pending_action.get("type") == "update_asset":
                 pa = st.session_state.pending_action
@@ -925,6 +1011,8 @@ elif active_tab == tab_labels[3]:
                             st.session_state.speak_id += 1
                             if "pending_action" in res:
                                  st.session_state.pending_action = res["pending_action"]
+                            if "download_data" in res:
+                                 st.session_state.history[-1]["download_data"] = res["download_data"]
                         st.rerun()
                     elif isinstance(res_voice, str): # Legacy compatibility if cache is stuck
                         transcription = res_voice
@@ -949,7 +1037,9 @@ elif active_tab == tab_labels[3]:
                 st.session_state.speak_text = res["answer"]
                 st.session_state.speak_id += 1
                 if "pending_action" in res:
-                     st.session_state.pending_action = res["pending_action"]
+                    st.session_state.pending_action = res["pending_action"]
+                if "download_data" in res:
+                     st.session_state.history[-1]["download_data"] = res["download_data"]
             st.rerun()
 
 # ─────────────── Auto-Playback Trigger ────────────────────────────────
