@@ -9,170 +9,134 @@ from scipy.sparse.csgraph import minimum_spanning_tree
 import geo_utils
 
 # File paths
-BASE_DIR = r"c:\Users\ESC_LAP_RPA 2\EnergyBot_Offline"
-GEOJSON_FILE = os.path.join(BASE_DIR, "excel_data", "utility_networks.geojson")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GEOJSON_FILE = os.path.join(BASE_DIR, "frontend", "public", "data", "utility_networks.geojson")
 
-DEFAULT_LAT = 51.285
-DEFAULT_LON = 7.051
-
-# Define the 3 Entry Stations (supply points) for all utilities
+# Define the supply points for all utilities
 STATIONS = {
     "Stadtnetz": [
-        {"name": "Hammerstein", "lat": 51.2880, "lon": 7.0550, "capacity": "High"},
-        {"name": "Kocherscheidt", "lat": 51.2810, "lon": 7.0450, "capacity": "Medium"}
+        {"name": "Hammerstein", "lat": 51.2880, "lon": 7.0550},
+        {"name": "Kocherscheidt", "lat": 51.2810, "lon": 7.0450}
     ],
     "Ortsteilnetz": [
-        {"name": "Rohdenhaus", "lat": 51.2950, "lon": 7.0600, "capacity": "Low"}
+        {"name": "Rohdenhaus", "lat": 51.2950, "lon": 7.0600}
     ]
 }
 
-UTILITIES = ["Gas", "Wasser", "Strom"]
+UTILITIES = ["Gas", "Wasser"]
 
 def get_osrm_route(p1, p2):
+    """Get a detailed road route between p1 and p2 using OSRM."""
     coords_str = f"{p1[0]},{p1[1]};{p2[0]},{p2[1]}"
     url = f"http://router.project-osrm.org/route/v1/driving/{coords_str}?overview=full&geometries=geojson"
     try:
-        for _ in range(2):
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("code") == "Ok":
-                    return data["routes"][0]["geometry"]["coordinates"]
-            time.sleep(1)
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("code") == "Ok":
+                return data["routes"][0]["geometry"]["coordinates"]
     except: pass
     return [p1, p2]
 
-def build_network_mst(points):
-    if len(points) <= 1: return []
-    dist_matrix = squareform(pdist(np.array(points)))
-    mst = minimum_spanning_tree(dist_matrix)
-    cx = mst.tocoo()
-    return [(points[i], points[j]) for i, j in zip(cx.row, cx.col)]
+def get_osrm_nearest(pt):
+    """Snap a point to the nearest road vertex using OSRM."""
+    url = f"http://router.project-osrm.org/nearest/v1/driving/{pt[0]},{pt[1]}?number=1"
+    try:
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("code") == "Ok":
+                return data["waypoints"][0]["location"]
+    except: pass
+    return pt
 
 def offset_polyline(coords, offset_dist):
-    """Offset a polyline by a perpendicular distance (in degrees approx)."""
-    if offset_dist == 0 or len(coords) < 2:
-        return coords
-        
+    if offset_dist == 0 or len(coords) < 2: return coords
     new_coords = []
     for i in range(len(coords)):
-        if i == 0:
-            v1, v2 = np.array(coords[i]), np.array(coords[i+1])
-        elif i == len(coords) - 1:
-            v1, v2 = np.array(coords[i-1]), np.array(coords[i])
-        else:
-            v1, v2 = np.array(coords[i-1]), np.array(coords[i+1])
-            
+        if i == 0: v1, v2 = np.array(coords[i]), np.array(coords[i+1])
+        elif i == len(coords)-1: v1, v2 = np.array(coords[i-1]), np.array(coords[i])
+        else: v1, v2 = np.array(coords[i-1]), np.array(coords[i+1])
         direction = v2 - v1
         dist = np.linalg.norm(direction)
-        if dist == 0:
-            new_coords.append(coords[i])
-            continue
-            
-        unit_direction = direction / dist
-        perp = np.array([-unit_direction[1], unit_direction[0]])
-        offset_pt = np.array(coords[i]) + perp * offset_dist
-        new_coords.append(offset_pt.tolist())
+        if dist == 0: new_coords.append(coords[i]); continue
+        perp = np.array([-direction[1], direction[0]]) / dist
+        new_coords.append((np.array(coords[i]) + perp * offset_dist).tolist())
     return new_coords
 
 def create_utility_features(utility):
-    print(f"Generating network for: {utility}")
-    df = geo_utils.get_utility_df(utility)
+    print(f"Generating optimized network for: {utility}")
+    df = geo_utils.get_utility_df(utility).dropna(subset=['lat', 'lon'])
     if df.empty: return []
 
-    def assign_network(row):
-        h_lat, h_lon = row['lat'], row['lon']
-        if pd.isna(h_lat) or pd.isna(h_lon): return "Stadtnetz"
-        min_dist_stadt = min([(h_lat - s['lat'])**2 + (h_lon - s['lon'])**2 for s in STATIONS["Stadtnetz"]])
-        min_dist_ort = min([(h_lat - s['lat'])**2 + (h_lon - s['lon'])**2 for s in STATIONS["Ortsteilnetz"]])
-        return "Stadtnetz" if min_dist_stadt < min_dist_ort else "Ortsteilnetz"
-    
-    df['network'] = df.apply(assign_network, axis=1)
+    all_stations = []
+    for zone, s_list in STATIONS.items():
+        for s in s_list: all_stations.append({**s, "zone": zone})
+
+    # Visual Offsets so Gas and Wasser don't overlap
+    OFFSET = {"Gas": 0.000035, "Wasser": -0.000035}
+    offset_val = OFFSET.get(utility, 0)
     
     features = []
-    OFFSET_MAP = {"Gas": -0.00004, "Wasser": 0.0, "Strom": 0.00004}
-    offset_val = OFFSET_MAP.get(utility, 0)
-    
-    for network_name in ["Stadtnetz", "Ortsteilnetz"]:
-        net_df = df[df['network'] == network_name].dropna(subset=['lat', 'lon'])
-        if net_df.empty: continue
+
+    for _, row in df.iterrows():
+        h_lat, h_lon = float(row["lat"]), float(row["lon"])
+        house_pt = [h_lon, h_lat]
+        risk = str(row.get("Risiko", "N/A"))
         
-        net_houses_data = net_df[['lon', 'lat', 'Risiko']].to_dict('records')
-        net_houses_pts = [[h['lon'], h['lat']] for h in net_houses_data]
-        net_stations_pts = [[st['lon'], st['lat']] for st in STATIONS[network_name]]
+        # 1. Snap house to nearest STREET Point -> This is the HUB
+        hub_pt = get_osrm_nearest(house_pt)
         
-        all_nodes = net_stations_pts + net_houses_pts
-        if len(all_nodes) < 2: continue
-        mst_edges = build_network_mst(all_nodes)
-        
-        for i, (p1, p2) in enumerate(mst_edges):
-            route_coords = get_osrm_route(p1, p2)
-            main_pipe_coords = offset_polyline(route_coords, offset_val)
-            
-            # Common properties to prevent Folium crash
-            common_props = {
-                "utility": utility,
-                "network": network_name,
-                "risiko": "N/A",
-                "street": "N/A",
-                "material": "N/A",
-                "dimension": "N/A"
-            }
-            
-            # 1. Main pipe
-            main_props = common_props.copy()
-            main_props.update({
-                "type": "Main Pipe",
-                "material": f"{utility} Main",
-                "dimension": "DN 150" if utility != "Strom" else "110kV"
-            })
-            features.append({
-                "type": "Feature",
-                "properties": main_props,
-                "geometry": {"type": "LineString", "coordinates": main_pipe_coords}
-            })
-            
-            if len(main_pipe_coords) >= 2:
-                for orig_pt, route_end in [(p1, main_pipe_coords[0]), (p2, main_pipe_coords[-1])]:
-                    match = next((h for h in net_houses_data if h['lon'] == orig_pt[0] and h['lat'] == orig_pt[1]), None)
-                    if match:
-                        risk = match['Risiko']
-                        lat_props = common_props.copy()
-                        lat_props.update({
-                            "type": "Lateral",
-                            "risiko": risk,
-                            "material": f"{utility} Connect",
-                            "dimension": "DN 40" if utility != "Strom" else "400V"
-                        })
-                        features.append({
-                            "type": "Feature",
-                            "properties": lat_props,
-                            "geometry": {"type": "LineString", "coordinates": [orig_pt, route_end]}
-                        })
-                        
-                        node_props = common_props.copy()
-                        node_props.update({
-                            "type": "Node",
-                            "risiko": risk # Nodes now carry risk for animation
-                        })
-                        features.append({
-                            "type": "Feature",
-                            "properties": node_props,
-                            "geometry": {"type": "Point", "coordinates": route_end}
-                        })
-            if i % 20 == 0: print(f"  {utility} {network_name}: {i}/{len(mst_edges)}")
-            
+        # 2. Find nearest supply station to connect this HUB to the main backbone
+        nearest_station = min(all_stations, key=lambda s: (h_lat-s["lat"])**2 + (h_lon-s["lon"])**2)
+        station_pt = [nearest_station["lon"], nearest_station["lat"]]
+
+        # 3. Create Main Pipeline (following streets)
+        route_coords = get_osrm_route(station_pt, hub_pt)
+        main_pipe = offset_polyline(route_coords, offset_val)
+
+        common_props = {
+            "utility": utility, "network": nearest_station["zone"],
+            "risiko": risk, "material": row.get("Werkstoff", "N/A"),
+            "dimension": row.get("Dimension", "N/A")
+        }
+
+        # MAIN PIPE Feature
+        features.append({
+            "type": "Feature",
+            "properties": {**common_props, "type": "Main Pipe", "risiko": "N/A"},
+            "geometry": {"type": "LineString", "coordinates": main_pipe}
+        })
+
+        # LATERAL Feature (House to Hub)
+        features.append({
+            "type": "Feature",
+            "properties": {**common_props, "type": "Lateral"},
+            "geometry": {"type": "LineString", "coordinates": [hub_pt, house_pt]}
+        })
+
+        # CONNECTION HUB Feature (The Box on the street)
+        features.append({
+            "type": "Feature",
+            "properties": {**common_props, "type": "Connection Hub"},
+            "geometry": {"type": "Point", "coordinates": hub_pt}
+        })
+
     return features
 
 def main():
     all_features = []
     for util in UTILITIES:
-        all_features.extend(create_utility_features(util))
+        try:
+            all_features.extend(create_utility_features(util))
+        except Exception as e:
+            print(f"Error: {e}")
         
     geojson = {"type": "FeatureCollection", "features": all_features}
+    os.makedirs(os.path.dirname(GEOJSON_FILE), exist_ok=True)
     with open(GEOJSON_FILE, 'w', encoding='utf-8') as f:
         json.dump(geojson, f, ensure_ascii=False, indent=2)
-    print(f"Generated {GEOJSON_FILE}")
+    print(f"Generated {GEOJSON_FILE} with {len(all_features)} features.")
 
 if __name__ == "__main__":
     main()

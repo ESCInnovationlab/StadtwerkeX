@@ -2,7 +2,6 @@
 """
 geo_utils.py — Data loader and geospatial utilities.
 """
-
 import os
 import re
 import json
@@ -22,22 +21,29 @@ MATERIAL_LIFESPAN = {
     "PE-HD": 50, "PE": 50, "PE100": 50, "PVC": 40,
     "Kupfer": 60, "Stahl": 65, "Grauguss": 80, "Duktilguss": 80,
     "Gusseisen": 80, "Kunststoff": 40, "HDPE": 50,
+    "AL": 45, "Kabel": 45, "NYY": 45
 }
 
 RISK_LADDER = {
     "Gas": [
         {"material": "Stahl mit KKS", "gut": 59, "mittel": 95, "life": 80},
         {"material": "Stahl ohne KKS", "gut": 51, "mittel": 83, "life": 70},
-        {"material": "Stahl", "gut": 51, "mittel": 83, "life": 70}, # Fallback if KKS not specified
         {"material": "PE", "gut": 55, "mittel": 89, "life": 75},
+        # Fallback for generic 'Stahl' in Gas
+        {"material": "Stahl", "gut": 51, "mittel": 83, "life": 70}, 
     ],
     "Wasser": [
         {"material": "Asbestzement-(AZ)", "gut": 36, "mittel": 59, "life": 50},
-        {"material": "Asbest", "gut": 36, "mittel": 59, "life": 50},
         {"material": "AZ", "gut": 36, "mittel": 59, "life": 50},
+        {"material": "Asbest", "gut": 36, "mittel": 59, "life": 50},
         {"material": "PE", "gut": 62, "mittel": 101, "life": 85},
         {"material": "PVC", "gut": 36, "mittel": 59, "life": 50},
         {"material": "Stahl", "gut": 44, "mittel": 71, "life": 60},
+    ],
+    "Strom": [
+        {"material": "Kabel", "gut": 35, "mittel": 50, "life": 45},
+        {"material": "AL", "gut": 35, "mittel": 50, "life": 45},
+        {"material": "NYY", "gut": 35, "mittel": 50, "life": 45},
     ]
 }
 
@@ -52,10 +58,30 @@ def _get_risk_profile(sparte: str, material: str):
 CURRENT_YEAR = datetime.now().year
 
 def _fix_encoding(s: str) -> str:
-    """Clean up strings from Excel artifacts."""
+    """Clean up strings from Excel artifacts aggressively using unicode escapes."""
     if not isinstance(s, str): return str(s)
-    s = s.replace('\ufffd', 'ü').replace('\u00fc', 'ü')
-    s = s.replace('\u00e4', 'ä').replace('\u00f6', 'ö').replace('\u00df', 'ß')
+    
+    # Standardize most common artifacts
+    s = s.replace('\ufffd', 'ü') # Default fallback
+    
+    # Specific German fixes
+    replacements = {
+        'Stra' + chr(0xfffd) + 'e': 'Straße',
+        'Strae': 'Straße',
+        'Strasse': 'Straße',
+        'Gre': 'Größe',
+        'Gr' + chr(0xfffd) + 'e': 'Größe',
+        'Lngengrad': 'Längengrad',
+        'L' + chr(0xfffd) + 'ndengrad': 'Längengrad',
+        'Kundenname': 'Kundenname'
+    }
+    for old, new in replacements.items():
+        s = s.replace(old, new)
+        
+    # Standardize remaining fallback artifacts
+    s = s.replace('\ufffd', 'ü')
+    s = s.replace('Strae', 'Straße')
+    
     s = s.replace('\x00', '')
     s = re.sub(r'\s+', ' ', s).strip()
     return s
@@ -199,6 +225,7 @@ def get_utility_df(utility: str) -> pd.DataFrame:
     renames = {
         "Kundenname": "Kundenname",
         "Kunden Name": "Kundenname",
+        "Kunden": "Kundenname",
         "Objekt-ID (Nummer bspw.)": "Kundennummer",
         "Objekt-ID": "Kundennummer",
         "Einbaudatum/ Fertigmeldung": "Einbaudatum",
@@ -207,7 +234,8 @@ def get_utility_df(utility: str) -> pd.DataFrame:
         "Kabeltyp AL": "Werkstoff",
         "Dimension Anschlussleitung": "Dimension",
         "Querschnitt AL": "Dimension",
-        "Strae": "Straße", "Strasse": "Straße",
+        "Querschnitt AL (mm²)": "Dimension",
+        "Strae": "Straße", "Strasse": "Straße", "Straße": "Straße",
         "Anschlusslänge Hausanschluss": "Länge",
         "Länge Anschlussleitung": "Länge",
     }
@@ -234,6 +262,12 @@ def get_utility_df(utility: str) -> pd.DataFrame:
     coords = df.apply(get_coordinates, axis=1)
     df["lat"] = coords.apply(lambda x: x[0])
     df["lon"] = coords.apply(lambda x: x[1])
+
+    # ── Final Cleaning ──
+    # Clean all string values in the dataframe to handle encoding artifacts
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].apply(lambda x: _fix_encoding(x) if isinstance(x, str) else x)
 
     if "Einbaudatum" in df.columns:
         df["Einbaudatum"] = df["Einbaudatum"].apply(_parse_date)

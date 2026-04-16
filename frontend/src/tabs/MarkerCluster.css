@@ -1,0 +1,44 @@
+/* Custom Cluster Styles for a Premium Look */
+.marker-cluster-small {
+  background-color: rgba(34, 197, 94, 0.6);
+}
+.marker-cluster-small div {
+  background-color: rgba(34, 197, 94, 0.6);
+  color: white;
+}
+
+.marker-cluster-medium {
+  background-color: rgba(234, 179, 8, 0.6);
+}
+.marker-cluster-medium div {
+  background-color: rgba(234, 179, 8, 0.6);
+  color: white;
+}
+
+.marker-cluster-large {
+  background-color: rgba(239, 68, 68, 0.6);
+}
+.marker-cluster-large div {
+  background-color: rgba(239, 68, 68, 0.6);
+  color: white;
+}
+
+.marker-cluster {
+  background-clip: padding-box;
+  border-radius: 20px;
+}
+
+.marker-cluster div {
+  width: 30px;
+  height: 30px;
+  margin-left: 5px;
+  margin-top: 5px;
+  text-align: center;
+  border-radius: 15px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

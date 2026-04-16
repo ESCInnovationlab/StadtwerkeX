@@ -5,31 +5,6 @@ DEUTSCHE VERSION | Navigierbare KPIs | Split-Schnittstelle (Karte & Liste)
 """
 
 import os
-import sys
-
-# Disable TQDM progress bars to prevent OSError 22 with sys.stderr in Streamlit
-os.environ["TQDM_DISABLE"] = "1"
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-
-# Robust workaround: monkeypatch sys.stderr and sys.stdout flush to ignore OSError 22
-if hasattr(sys, 'stderr') and sys.stderr is not None and hasattr(sys.stderr, 'flush'):
-    original_err_flush = sys.stderr.flush
-    def safe_err_flush():
-        try:
-            original_err_flush()
-        except OSError:
-            pass
-    sys.stderr.flush = safe_err_flush
-
-if hasattr(sys, 'stdout') and sys.stdout is not None and hasattr(sys.stdout, 'flush'):
-    original_out_flush = sys.stdout.flush
-    def safe_out_flush():
-        try:
-            original_out_flush()
-        except OSError:
-            pass
-    sys.stdout.flush = safe_out_flush
-
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -42,11 +17,10 @@ from rag_engine import EnergyRAG
 from geo_utils import (
     ALL_UTILITIES, get_utility_df, get_unified_df,
     kpi_advanced, invalidate_cache, get_material_distribution,
-    get_bundling_potential, CURRENT_YEAR,
-    regenerate_network_geojson, is_geojson_stale
+    get_bundling_potential, CURRENT_YEAR
 )
 import folium
-from streamlit_folium import st_folium, folium_static
+from streamlit_folium import st_folium
 from folium.plugins import MarkerCluster
 from streamlit_mic_recorder import mic_recorder
 from gtts import gTTS
@@ -55,85 +29,6 @@ import io
 import base64
 
 load_dotenv()
-
-# Define Reusable Utils for Networks (Global Scope)
-COLOR_MAP = {
-    "Gas":    {"main": "#f97316", "lateral": "#fed7aa", "node": "#ea580c"},   # Orange
-    "Wasser": {"main": "#3b82f6", "lateral": "#93c5fd", "node": "#1d4ed8"}    # Blue
-}
-
-def get_pipeline_style(feature, active_utility):
-    futil = feature.get("properties", {}).get("utility", "")
-    ftype = feature.get("properties", {}).get("type", "")
-    frisk = feature.get("properties", {}).get("risiko", "")
-    
-    is_visible = (active_utility == "Alle Sparten") or (futil == active_utility)
-    if not is_visible:
-        return {"opacity": 0, "fillOpacity": 0, "weight": 0}
-
-    colors = COLOR_MAP.get(futil, {"main": "gray", "lateral": "lightgray", "node": "black"})
-    
-    if ftype == "Main Pipe":
-        # Animated energy flow on main pipes: dashArray enables CSS animation
-        return {
-            "color": colors["main"],
-            "weight": 4,
-            "opacity": 0.95,
-            "dashArray": "16 8",        # drives the flow animation
-        }
-    elif ftype == "Lateral":
-        is_high = (frisk == "Hoch")
-        return {
-            "color": colors["lateral"],
-            "weight": 3 if is_high else 2,
-            "opacity": 0.9,
-            "dashArray": "6 4",         # shorter dash for lateral needle
-        }
-    elif ftype == "Node":
-        if frisk == "Hoch":
-            return {
-                "radius": 10,
-                "color": "#ef4444",
-                "fillColor": "#ef4444",
-                "fillOpacity": 1.0,
-                "weight": 2,
-                "className": "high-risk-ping"
-            }
-        return {"radius": 5, "color": colors["node"], "fillColor": colors["node"], "fillOpacity": 1, "weight": 1}
-    elif ftype == "Connection Node":
-        # Junction point on the street
-        return {
-            "radius": 4,
-            "color": colors["main"],
-            "fillColor": "white",      # visual "hole" or junction effect
-            "fillOpacity": 1.0,
-            "weight": 2
-        }
-    return {"color": colors["main"], "weight": 2}
-
-def inject_map_animation(map_obj):
-    from branca.element import Element
-    map_obj.get_root().header.add_child(Element("""
-    <style>
-    /* Energy flow: dashed pipes animate by moving dashOffset forward */
-    @keyframes energy_flow {
-        0%   { stroke-dashoffset: 48; }
-        100% { stroke-dashoffset: 0;  }
-    }
-    /* Pulsing glow for high-risk nodes */
-    @keyframes pulse_ping {
-        0%   { stroke-width: 2px;  stroke-opacity: 1; }
-        100% { stroke-width: 14px; stroke-opacity: 0; }
-    }
-    /* Apply to ALL paths that carry a dashArray (main pipes + laterals) */
-    path[stroke-dasharray] {
-        animation: energy_flow 1.2s linear infinite !important;
-    }
-    .high-risk-ping {
-        animation: pulse_ping 1.5s ease-out infinite !important;
-    }
-    </style>
-    """))
 
 # ─────────────── Konfiguration ──────────────────────────────────────
 st.set_page_config(
@@ -148,195 +43,60 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
 
 html, body, [data-testid="stAppViewContainer"] {
-    background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%) !important;
+    background-color: #ffffff !important;
     color: #000000 !important;
     font-family: 'Outfit', sans-serif !important;
 }
 
-/* --- High Octane Space Login CSS --- */
-.space-login-container {
-    position: fixed;
-    top: 0; left: 0; width: 100vw; height: 100vh;
-    background: #000;
-    z-index: 9999;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    font-family: 'Outfit', sans-serif;
-}
-
-.starfield {
-    position: absolute;
-    width: 200%; height: 200%;
-    background: transparent url('https://s3-us-west-2.amazonaws.com/s.cdpn.io/123163/stars.png') repeat;
-    background-size: 800px;
-    animation: move-stars 150s linear infinite;
-    opacity: 0.5;
-}
-
-@keyframes move-stars {
-    from { transform: translate(0,0); }
-    to { transform: translate(-50%, -50%); }
-}
-
-.earth-glow {
-    position: relative;
-    width: 450px; height: 450px;
-    background: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Earth_Western_Hemisphere_transparent_background.png/600px-Earth_Western_Hemisphere_transparent_background.png');
-    background-size: cover;
-    border-radius: 50%;
-    box-shadow: inset -20px -20px 50px #000, 0 0 80px rgba(59, 130, 246, 0.4);
-    animation: rotate-earth 60s linear infinite;
-    transition: transform 2s cubic-bezier(0.7, 0, 0.3, 1), opacity 1.5s ease-in;
-}
-
-@keyframes rotate-earth {
-    from { background-position: 0 0; }
-    to { background-position: 1200px 0; }
-}
-
-.zoom-active {
-    transform: scale(15) translate(15%, 5%);
-    opacity: 0;
-}
-
-.login-overlay {
-    position: relative;
-    z-index: 10000;
-    text-align: center;
-    color: white;
-}
-
-.glitch-title {
-    font-size: 72px;
-    font-weight: 800;
-    letter-spacing: 15px;
-    text-transform: uppercase;
-    margin-bottom: 20px;
-    text-shadow: 0 0 20px rgba(255,255,255,0.5);
-}
-
-.btn-neon {
-    background: transparent;
-    border: 1px solid #3b82f6;
-    color: #3b82f6;
-    padding: 15px 40px;
-    font-size: 18px;
-    text-transform: uppercase;
-    letter-spacing: 3px;
-    cursor: pointer;
-    transition: all 0.3s;
-    border-radius: 4px;
-}
-.btn-neon:hover { background: #3b82f6; color: white; box-shadow: 0 0 30px #3b82f6; }
-
 [data-testid="stSidebar"] {
-    background-color: rgba(248, 250, 252, 0.8) !important;
-    backdrop-filter: blur(10px);
+    background-color: #f8fafc !important;
     border-right: 1px solid #e2e8f0;
 }
 
-/* 3D Glassmorphism Cards */
-.glass-card {
-    background: rgba(255, 255, 255, 0.7);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    border-radius: 20px;
-    padding: 25px;
-    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
-}
-.glass-card:hover {
-    transform: translateY(-5px) scale(1.01);
-    box-shadow: 0 15px 45px 0 rgba(31, 38, 135, 0.12);
-}
+.main-header { font-size: 34px; font-weight: 700; color: #0f172a; margin-bottom: 5px; }
+.sub-header { font-size: 15px; color: #475569; margin-bottom: 25px; }
 
-/* Professional Hero Section */
-.hero-container {
-    text-align: center;
-    padding: 80px 20px;
-    background: radial-gradient(circle at top right, rgba(59, 130, 246, 0.05), transparent),
-                radial-gradient(circle at bottom left, rgba(249, 115, 22, 0.05), transparent);
-}
-.hero-title {
-    font-size: 56px;
-    font-weight: 800;
-    background: linear-gradient(90deg, #0f172a, #334155);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    margin-bottom: 10px;
-    letter-spacing: -1px;
-}
-.hero-subtitle {
-    font-size: 20px;
-    color: #64748b;
-    max-width: 700px;
-    margin: 0 auto 40px auto;
-    line-height: 1.6;
-}
-
-/* Refined KPI Cards */
+/* KPI Karten */
 .metric-card {
-    background: rgba(255, 255, 255, 0.8);
-    backdrop-filter: blur(8px);
-    border-radius: 18px;
+    background-color: #ffffff; 
+    border-radius: 12px;
     padding: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.5);
-    box-shadow: 10px 10px 30px rgba(0,0,0,0.02), -5px -5px 15px rgba(255,255,255,0.8);
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    transition: all 0.2s ease;
     text-align: center;
-    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    color: #0f172a !important;
+    cursor: pointer;
 }
-.metric-card:hover {
-    transform: translateZ(20px) scale(1.05);
-    box-shadow: 20px 20px 40px rgba(0,0,0,0.05);
-}
+.metric-card:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,0.08); }
 .metric-value { font-size: 36px; font-weight: 800; color: #0f172a; }
 .metric-label { font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 5px; }
-
-/* Modern 3D Buttons */
-.stButton button {
-    border-radius: 15px !important;
-    border: none !important;
-    box-shadow: 0 4px 14px 0 rgba(0,118,255,0.1) !important;
-    transition: all 0.2s ease !important;
-    font-weight: 600 !important;
-}
-.stButton button[kind="primary"] {
-    background: linear-gradient(90deg, #3b82f6, #2563eb) !important;
-    padding: 12px 24px !important;
-    font-size: 16px !important;
-    letter-spacing: 1px !important;
-}
-.stButton button:hover {
-    transform: translateY(-2px) !important;
-    box-shadow: 0 6px 20px rgba(0,118,255,0.15) !important;
-}
+.metric-detail { font-size: 10px; color: #94a3b8; margin-top: 3px; }
 
 /* Seitenleiste für Map/List Split */
 .split-list-container {
     height: 650px;
     overflow-y: auto;
     padding: 10px;
-    background: rgba(255, 255, 255, 0.5);
-    border-radius: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: #ffffff;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
 }
 .asset-item {
     background: white;
     padding: 12px;
     margin-bottom: 8px;
-    border-radius: 12px;
+    border-radius: 8px;
     border-left: 4px solid #e2e8f0;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.03);
 }
 
 .stTabs [data-baseweb="tab-list"] { gap: 20px; }
 .stTabs [data-baseweb="tab"] { color: #64748b; font-weight: 600; font-size: 14px; }
 .stTabs [aria-selected="true"] { color: #0f172a !important; border-bottom-color: #0f172a !important; }
 
-.bot-msg { background: rgba(241, 245, 249, 0.8); backdrop-filter: blur(4px); border: 1px solid #e2e8f0; color: #0f172a; padding: 15px; border-radius: 18px; margin-bottom: 10px; font-size: 14px; box-shadow: 2px 2px 10px rgba(0,0,0,0.02); }
-.user-msg { background: white; border: 1px solid #e2e8f0; color: #0f172a; padding: 15px; border-radius: 18px; margin-bottom: 10px; text-align: right; font-size: 14px; box-shadow: 2px 2px 10px rgba(0,0,0,0.02); }
+.bot-msg { background: #f1f5f9; border: 1px solid #e2e8f0; color: #0f172a; padding: 12px; border-radius: 12px; margin-bottom: 10px; font-size: 14px; }
+.user-msg { background: #ffffff; border: 1px solid #e2e8f0; color: #0f172a; padding: 12px; border-radius: 12px; margin-bottom: 10px; text-align: right; font-size: 14px; }
 
 /* Floating Mic Styling */
 .stMicRecorder {
@@ -349,11 +109,11 @@ html, body, [data-testid="stAppViewContainer"] {
     border-radius: 50% !important;
     width: 45px !important;
     height: 45px !important;
-    background-color: rgba(255, 255, 255, 0.9) !important;
+    background-color: #ffffff !important;
     color: #0f172a !important;
-    border: 1px solid rgba(255, 255, 255, 0.5) !important;
+    border: 1px solid #e2e8f0 !important;
     transition: all 0.3s ease;
-    box-shadow: 0 8px 15px rgba(0,0,0,0.1) !important;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
 }
 .stMicRecorder button:hover {
     background-color: #334155 !important;
@@ -376,59 +136,26 @@ html, body, [data-testid="stAppViewContainer"] {
     70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
     100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
-    /* Custom Styling for Chat Markdown Tables */
-    .stChatMessage [data-testid="stMarkdownContainer"] table {
-        width: 100%;
-        border-collapse: collapse;
-        margin: 10px 0;
-        font-size: 0.85em;
-        font-family: 'Outfit', sans-serif;
-        border-radius: 8px;
-        overflow: hidden;
-        border: 1px solid #e2e8f0;
-    }
-    .stChatMessage [data-testid="stMarkdownContainer"] th {
-        background-color: #f1f5f9;
-        color: #0f172a;
-        text-align: left;
-        padding: 8px 12px;
-        border-bottom: 2px solid #e2e8f0;
-    }
-    .stChatMessage [data-testid="stMarkdownContainer"] td {
-        padding: 6px 12px;
-        border-bottom: 1px solid #f1f5f9;
-        color: #334155;
-    }
-    .stChatMessage [data-testid="stMarkdownContainer"] tr:nth-of-type(even) {
-        background-color: #f8fafc;
-    }
-    .stChatMessage [data-testid="stMarkdownContainer"] tr:hover {
-        background-color: #eff6ff;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────── Session State ──────────────────────────────────────
 if "authenticated" not in st.session_state: st.session_state.authenticated = False
-if "page" not in st.session_state: st.session_state.page = "landing"
-if "login_phase" not in st.session_state: st.session_state.login_phase = "space"
 if "active_tab" not in st.session_state: st.session_state.active_tab = "📈 Strategische Analyse"
 if "drilldown_type" not in st.session_state: st.session_state.drilldown_type = "None"
 if "speak_text" not in st.session_state: st.session_state.speak_text = None
 if "speak_id" not in st.session_state: st.session_state.speak_id = 0
 if "history" not in st.session_state: st.session_state.history = []
 if "pending_action" not in st.session_state: st.session_state.pending_action = None
-if "inline_map_messages" not in st.session_state: st.session_state.inline_map_messages = {}
 if "map_center" not in st.session_state: st.session_state.map_center = None
 if "map_zoom" not in st.session_state: st.session_state.map_zoom = 13
 if "last_utility" not in st.session_state: st.session_state.last_utility = None
 if "target_tab" not in st.session_state: st.session_state.target_tab = None
 if "last_map_idx" not in st.session_state: st.session_state.last_map_idx = None
 if "selected_customer_id" not in st.session_state: st.session_state.selected_customer_id = None
-if "auto_kb_refreshed" not in st.session_state: st.session_state.auto_kb_refreshed = False
 
 # CRITICAL: If a target tab is set, override the logical and widget state BEFORE the UI renders
-if st.session_state.target_tab and st.session_state.target_tab in ["📉 Strategische Analyse", "🗺️ Netz-Karte", "🛡️ Compliance & Daten", "🤖 KI -Assistent"]:
+if st.session_state.target_tab and st.session_state.target_tab in ["📉 Strategische Analyse", "🗺️ Netz-Karte", "🛡️ Compliance & Daten", "🤖 AI -Assistent"]:
     st.session_state.active_tab = st.session_state.target_tab
     st.session_state.navigation_tab_widget = st.session_state.target_tab
     st.session_state.target_tab = None
@@ -442,61 +169,15 @@ def check_auth(user, pwd):
 
 # ─────────────── Login ───────────────────────────────────────────────
 if not st.session_state.authenticated:
-    if st.session_state.login_phase == "space":
-        # --- High-Octane 3D WebGL Cinematic Scene ---
-        st.markdown("""
-            <style>
-            /* Force the iframe to overtake the entire screen unconditionally */
-            iframe[title="streamlit_components.v1.components.html"] {
-                position: fixed !important;
-                top: 0 !important;
-                left: 0 !important;
-                width: 100vw !important;
-                height: 100vh !important;
-                z-index: 999999 !important;
-                border: none !important;
-            }
-            .invisible-btn {
-                opacity: 0; pointer-events: none; position: absolute;
-            }
-            </style>
-        """, unsafe_allow_html=True)
-        
-        try:
-            with open("landing_3d.html", "r", encoding="utf-8") as f:
-                html_data = f.read()
-            import streamlit.components.v1 as components
-            components.html(html_data, height=0)  # height=0 because CSS forces 100vh overlay
-        except Exception as e:
-            st.error(f"Konnte WebGL Oberfläche nicht laden: {e}")
-
-        # The invisible bridge button that the internal iframe will click!
-        st.markdown('<div class="invisible-btn">', unsafe_allow_html=True)
-        if st.button("SYSTEMSTART_HIDDEN", key="hidden_forward"):
-            st.session_state.login_phase = "zoom"
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        # Phase 2: The Login Form with Zoom Transition
-        st.markdown('<div class="hero-container"><h1 class="hero-title">STADTWERKE X</h1><p class="hero-subtitle">Verschlüsselter Systemzugriff</p></div>', unsafe_allow_html=True)
-        _, c2, _ = st.columns([1.2, 1.6, 1.2])
-        with c2:
-            with st.container(border=True):
-                u = st.text_input("Benutzername")
-                p = st.text_input("Passwort", type="password")
-                if st.button("Authentifizieren", use_container_width=True, type="primary"): 
-                    check_auth(u, p)
-                if st.button("Abbrechen", key="cancel_login"):
-                    st.session_state.login_phase = "space"
-                    st.rerun()
+    st.markdown('<h1 style="color:#0f172a; text-align:center; margin-top:100px; white-space: nowrap;">🏢 STADTWERKE X</h1><p style="text-align:center; color:#64748b;">Plattform für Infrastruktur-Intelligenz</p>', unsafe_allow_html=True)
+    _, c2, _ = st.columns([1.2, 1.6, 1.2])
+    with c2:
+        u = st.text_input("Benutzername")
+        p = st.text_input("Passwort", type="password")
+        if st.button("Anmelden", use_container_width=True): check_auth(u, p)
     st.stop()
 
-# ─────────────── Auto-update map if Excel changed ─────────────────────
-if is_geojson_stale():
-    try: regenerate_network_geojson()
-    except: pass
-
-# ─────────────── Backend & Helpers ────────────────────────────────────
+# ─────────────── Backend ─────────────────────────────────────────────
 @st.cache_resource
 def get_engine(): return EnergyRAG()
 
@@ -504,129 +185,60 @@ def get_engine(): return EnergyRAG()
 def load_data_cached(util):
     df = get_unified_df() if util == "Alle Sparten" else get_utility_df(util)
     if not df.empty:
+        # Pre-calculate Netz-Karte to avoid SettingWithCopyWarning and repeated calculations
         if "Material Netzleitung" in df.columns and "Dimension Netzleitung" in df.columns:
             df["Netz-Karte"] = df["Material Netzleitung"].astype(str) + " / " + df["Dimension Netzleitung"].astype(str)
-        else: df["Netz-Karte"] = "N/A"
+        else:
+            df["Netz-Karte"] = "N/A"
     return kpi_advanced(df), df
 
 def play_audio(text):
     if not text: return
     try:
+        # Simple bilingual detection
         en_indicators = [' the ', ' is ', ' are ', ' where ', ' how ', ' manual ', ' what ']
         lang = 'en' if any(ind in text.lower() for ind in en_indicators) else 'de'
+        
         tts = gTTS(text=text, lang=lang)
-        fp = io.BytesIO(); tts.write_to_fp(fp); fp.seek(0)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
         b64 = base64.b64encode(fp.read()).decode()
+        
+        # Unique ID using session state counter
         uid = st.session_state.get("speak_id", 0)
-        audio_html = f'<html><body><audio id="audio_{uid}" autoplay><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio><script>var audio = document.getElementById("audio_{uid}");audio.play();</script></body></html>'
+        
+        # Using a component for a clean "fresh" iframe which forces audio refresh
+        audio_html = f"""
+            <html>
+                <body>
+                    <audio id="audio_{uid}" autoplay>
+                        <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+                    </audio>
+                    <script>
+                        var audio = document.getElementById('audio_{uid}');
+                        audio.play().catch(function(error) {{
+                            console.log("Autoplay blocked or failed:", error);
+                        }});
+                    </script>
+                </body>
+            </html>
+        """
         import streamlit.components.v1 as components
         components.html(audio_html, height=0, width=0)
+        
+        # Reset state
         st.session_state.speak_text = None
-    except: pass
+    except Exception as e:
+        st.sidebar.error(f"TTS Error: {str(e)}")
 
-# ─────────────── Landing Page View ───────────────────────────────────
-def render_landing_page():
-    kpis, df = load_data_cached("Alle Sparten")
-    st.markdown("""
-        <div class="hero-container">
-            <h1 class="hero-title">Willkommen bei STADTWERKE X</h1>
-            <p class="hero-subtitle">
-                Die nächste Generation des Infrastruktur-Managements. 
-                KI-gestützte Risikoanalyse, automatisierte Netzplanung und vorausschauende Instandhaltung – alles in einer Hand.
-            </p>
-        </div>
-    """, unsafe_allow_html=True)
-
-    # Prominent High-Octane CTA Button
-    _, cta_col, _ = st.columns([1.2, 1.6, 1.2])
-    with cta_col:
-        if st.button("🚀 DAS SYSTEM-DASHBOARD ÖFFNEN", use_container_width=True, type="primary", key="hero_enter_btn"):
-            st.session_state.page = "dashboard"
-            st.rerun()
-
-    # 3D Infrastructure Depth Visualization
-    if not df.empty:
-        plot_df = df.dropna(subset=['lat', 'lon', 'Alter']).copy()
-        if not plot_df.empty:
-            # Performance sampling for the landing page
-            if len(plot_df) > 2000:
-                plot_df = plot_df.sample(2000)
-            
-            fig = go.Figure()
-            for sparte in plot_df['Sparte'].unique():
-                sdf = plot_df[plot_df['Sparte'] == sparte]
-                color = "#f97316" if sparte == "Gas" else "#3b82f6"
-                fig.add_trace(go.Scatter3d(
-                    x=sdf['lon'],
-                    y=sdf['lat'],
-                    z=sdf['Alter'],
-                    mode='markers',
-                    marker=dict(size=3, color=color, opacity=0.8, 
-                                line=dict(color='white', width=0.5)),
-                    name=sparte,
-                    hovertemplate="<b>%{text}</b><br>Alter: %{z} Jahre<extra></extra>",
-                    text=sdf['Kundenname'] if 'Kundenname' in sdf.columns else sdf.index
-                ))
-
-            fig.update_layout(
-                height=450,
-                margin=dict(l=0, r=0, b=0, t=0),
-                paper_bgcolor='rgba(0,0,0,0)',
-                scene=dict(
-                    xaxis=dict(visible=False),
-                    yaxis=dict(visible=False),
-                    zaxis=dict(
-                        title=dict(text='Anlagenalter (Jahre)', font=dict(size=10, color='#64748b')), 
-                        showgrid=True, gridcolor='rgba(203, 213, 225, 0.2)', 
-                        tickfont=dict(size=8, color='#94a3b8')),
-                    bgcolor='rgba(0,0,0,0)',
-                    camera=dict(eye=dict(x=1.7, y=1.7, z=1.2))
-                ),
-                showlegend=False
-            )
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("""
-            <div class="glass-card">
-                <h3 style="color:#0f172a; margin-top:0;">🗺️ Netz-Transparenz</h3>
-                <p style="color:#64748b; font-size:14px;">Echtzeit-Visualisierung Ihrer Gas-, Wasser- und Stromnetze mit dynamischer Risikobewertung pro Anschluss.</p>
-            </div>
-        """, unsafe_allow_html=True)
-    with c2:
-        st.markdown("""
-            <div class="glass-card">
-                <h3 style="color:#0f172a; margin-top:0;">🤖 KI-Analytik</h3>
-                <p style="color:#64748b; font-size:14px;">Nutzen Sie modernste Sprachmodelle, um komplexe Fragen zu Ihrem Anlagenbestand in Sekunden zu beantworten.</p>
-            </div>
-        """, unsafe_allow_html=True)
-    with c3:
-        st.markdown("""
-            <div class="glass-card">
-                <h3 style="color:#0f172a; margin-top:0;">🛡️ Risikomanagement</h3>
-                <p style="color:#64748b; font-size:14px;">Automatisierte Identifikation von überalterten Leitungen und Priorisierung von Erneuerungsmaßnahmen.</p>
-            </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    _, center_btn, _ = st.columns([1.5, 1, 1.5])
-    with center_btn:
-        if st.button("🚀 Dashboard starten", use_container_width=True, type="primary"):
-            st.session_state.page = "dashboard"
-            st.rerun()
-    
-# ─────────────── Sidebar (Rendered before stop() to persist) ─────────
+# ─────────────── Sidebar ─────────────────────────────────────────────
 with st.sidebar:
     st.image("https://img.icons8.com/isometric/100/factory.png", width=50)
     st.markdown("### System-Steuerung")
     selected_utility = st.selectbox("Sparte auswählen", ["Alle Sparten"] + ALL_UTILITIES)
     
     st.divider()
-    if st.button("🏠 Zur Startseite", use_container_width=True):
-        st.session_state.page = "landing"
-        st.rerun()
-
     st.markdown("### KI-Training & Status")
     engine = get_engine()
     llm_status = engine.check_llm_status()
@@ -636,26 +248,18 @@ with st.sidebar:
     kb_count = engine.vs.count()
     st.info(f"Daten im Speicher: {kb_count}")
     
-    if st.button("🔄 KI-Speicher aktualisieren", use_container_width=True):
-        with st.spinner("Indiziere Daten & aktualisiere Karte..."):
-            try:
-                feat_count = regenerate_network_geojson()
-                st.toast(f"🗺️ Karte aktualisiert ({feat_count} Netzwerk-Features)")
-            except Exception as _e: st.warning(f"Karte Fehler: {_e}")
+    if st.button("🔄 KI-Speicher aktualisieren", use_container_width=True, type="primary"):
+        with st.spinner("Indiziere Daten..."):
             invalidate_cache()
             st.cache_resource.clear()
             st.cache_data.clear()
             engine = get_engine()
             count = engine.init_or_refresh_kb(reset=True)
+            st.success(f"Erfolgreich: {count} Datensätze indiziert.")
             st.rerun()
 
     st.divider()
     st.button("🚪 Abmelden", on_click=lambda: st.session_state.update({"authenticated": False}), use_container_width=True)
-
-# ─────────────── Main Navigation Dispatcher ──────────────────────────
-if st.session_state.page == "landing":
-    render_landing_page()
-    st.stop()
 
 # ─────────────── Utility Switch Logic ─────────────────────────────────
 if st.session_state.last_utility != selected_utility:
@@ -665,7 +269,7 @@ if st.session_state.last_utility != selected_utility:
 
 # ─────────────── Dashboard ────────────────────────────────────────────
 kpis, df = load_data_cached(selected_utility)
-COLORS = {"Gas": "#f59e0b", "Wasser": "#3b82f6", "Hoch": "#ef4444", "Mittel": "#f59e0b", "Niedrig": "#22c55e", "Unbekannt": "#94a3b8"}
+COLORS = {"Gas": "#f59e0b", "Wasser": "#3b82f6", "Strom": "#10b981", "Hoch": "#ef4444", "Mittel": "#f59e0b", "Niedrig": "#22c55e", "Unbekannt": "#94a3b8"}
 
 st.markdown('<h1 class="main-header">STADTWERKE X</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Plattform für Infrastruktur-Analyse, Risikomanagement und Lifecycle-Planung.</p>', unsafe_allow_html=True)
@@ -686,12 +290,12 @@ with cols[0]:
 
 # KPI 2: Kritisches Risiko (NAVIGATES TO MAP)
 with cols[1]:
-    st.markdown(f'<div class="metric-card" style="border-color:#ef4444;"><div class="metric-value" style="color:#ef4444;">{kpis["critical"]}</div><div class="metric-label">Ersatzbedarf (Kritisch)</div><div class="metric-detail">Sofortiger Handlungsbedarf</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card" style="border-color:#ef4444;"><div class="metric-value" style="color:#ef4444;">{kpis["critical"]}</div><div class="metric-label">Kritisches Risiko</div><div class="metric-detail">Sofortiger Handlungsbedarf</div></div>', unsafe_allow_html=True)
     if st.button("Auf Karte zeigen", key="nav_crit", use_container_width=True): navigate_to("🗺️ Netz-Karte", "Critical")
 
 # KPI 3: Überalterung
 with cols[2]:
-    st.markdown(f'<div class="metric-card" style="border-color:#f59e0b;"><div class="metric-value" style="color:#f59e0b;">{kpis.get("over_lifespan", 0)}</div><div class="metric-label">Über Nutzungsdauer</div><div class="metric-detail">Technische Nutzungsdauer erreicht</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card"><div class="metric-value">{kpis["aging_30"]}</div><div class="metric-label">Überalterung</div><div class="metric-detail">> 30 Jahre Nutzungsdauer</div></div>', unsafe_allow_html=True)
     if st.button("Lebenszyklus-Details", key="nav_aging", use_container_width=True): navigate_to("🗺️ Netz-Karte", "Aging")
 
 # KPI 4: Infrastruktur
@@ -700,7 +304,7 @@ with cols[3]:
     if st.button("Eignung prüfen", key="nav_infra", use_container_width=True): navigate_to("🗺️ Netz-Karte", "Unsuitable")
 
 # --- Tabs (Programmatic) ---
-tab_labels = ["📉 Strategische Analyse", "🗺️ Netz-Karte", "🛡️ Compliance & Daten", "🤖 KI -Assistent"]
+tab_labels = ["📉 Strategische Analyse", "🗺️ Netz-Karte", "🛡️ Compliance & Daten", "🤖 AI -Assistent"]
 
 # Inject CSS to style radio buttons to look like tabs
 st.markdown("""
@@ -780,14 +384,9 @@ if active_tab == tab_labels[0]:
             
             if not view_df.empty:
                 # Table displayed using the pre-calculated Netz-Karte
-                cols_to_show = ["Kundenname", "Kundennummer", "Sparte", "Straße", "Hausnummer", "Werkstoff", "Alter", "Risiko", "Einbaujahr", "Netz-Karte", "lat", "lon"]
-                # Filter available columns
-                available_cols = [c for c in cols_to_show if c in view_df.columns]
-                
                 event = st.dataframe(
-                    view_df[available_cols],
+                    view_df[["Kundennummer", "Sparte", "Straße", "Hausnummer", "Werkstoff", "Alter", "Risiko", "Einbaujahr", "Netz-Karte", "lat", "lon"]],
                     column_config={
-                        "Kundenname": st.column_config.TextColumn("Kunde", width="medium"),
                         "Kundennummer": st.column_config.TextColumn("ID", width="small"),
                         "Sparte": st.column_config.TextColumn("Sparte", width="small"),
                         "Straße": st.column_config.TextColumn("Straße"),
@@ -863,7 +462,7 @@ elif active_tab == tab_labels[1]:
         if st.session_state.drilldown_type == "Critical":
             map_df = map_df[map_df["Risiko"] == "Hoch"]
         elif st.session_state.drilldown_type == "Aging":
-            map_df = map_df[map_df.get("Erneuerung_empfohlen_bis", 2099) < CURRENT_YEAR]
+            map_df = map_df[map_df["Alter"] >= 30]
         elif st.session_state.drilldown_type == "Unsuitable":
             map_df = map_df[map_df["Infrastruktur_ungeeignet"] == True]
         
@@ -888,8 +487,7 @@ elif active_tab == tab_labels[1]:
                     location=[m_lat, m_lon], 
                     zoom_start=m_zoom,
                     tiles="OpenStreetMap",
-                    control_scale=True,
-                    max_zoom=22 # Allow deeper zoom for connection details
+                    control_scale=True
                 )
                 
                 # Show Reset Button if focused
@@ -904,25 +502,6 @@ elif active_tab == tab_labels[1]:
                 # Use Marker Cluster for better performance/look with 300+ markers
                 marker_cluster = MarkerCluster().add_to(m)
                 
-                # Add Utility Network Layer Feature
-                geojson_path = os.path.join(os.path.dirname(__file__), "excel_data", "utility_networks.geojson")
-                if os.path.exists(geojson_path):
-                    sparte_active = st.session_state.get("last_utility", "Alle Sparten")
-                    inject_map_animation(m)
-                    folium.GeoJson(
-                        geojson_path,
-                        name="Utility Networks",
-                        style_function=lambda f: get_pipeline_style(f, sparte_active),
-                        marker=folium.CircleMarker(),
-                        tooltip=folium.features.GeoJsonTooltip(
-                            fields=["utility", "type", "risiko", "network", "material", "dimension"],
-                            aliases=["Sparte:", "Typ:", "Risiko:", "Netz:", "Material:", "Dimension:"],
-                            labels=True,
-                            sticky=False
-                        )
-                    ).add_to(m)
-                    folium.LayerControl().add_to(m)
-
                 # Color Mapping
                 FO_COLORS = {"Hoch": "red", "Mittel": "orange", "Niedrig": "green", "Unbekannt": "blue"}
                 
@@ -933,17 +512,14 @@ elif active_tab == tab_labels[1]:
                     cust_id = str(row["Kundennummer"])
                     
                     # Professional Tooltip HTML
-                    name = row.get("Kundenname", cust_id)
                     popup_content = f"""
                     <div style="font-family: 'Outfit', sans-serif; min-width: 220px; font-size: 13px;">
                         <h4 style="margin: 0 0 10px 0; color: #0f172a; border-bottom: 2px solid {color}; padding-bottom: 5px;">
-                            {name}
+                            {row['Sparte']} - {cust_id}
                         </h4>
                         <table style="width: 100%; border-collapse: collapse;">
-                            <tr><td style="padding: 2px 0;"><b>🆔 ID:</b></td><td>{cust_id}</td></tr>
-                            <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
-                            <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Postleitzahl', '')} {row.get('Gemeinde', 'Wülfrath')}</td></tr>
-                            <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
+                            <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
+                            <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
                             <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
                             <tr><td style="padding: 2px 0;"><b>⚠️ Risiko:</b></td><td style="color: {color}; font-weight: bold;">{risk_status}</td></tr>
                         </table>
@@ -959,16 +535,14 @@ elif active_tab == tab_labels[1]:
 
                     # HIGHLIGHT SELECTED CUSTOMER: Add a special red icon outside Cluster
                     if st.session_state.selected_customer_id == cust_id:
-                        name = row.get("Kundenname", cust_id)
                         highlight_popup = f"""
                         <div style="font-family: 'Outfit', sans-serif; min-width: 250px; font-size: 13px;">
                             <h4 style="margin: 0 0 10px 0; color: #ef4444; border-bottom: 2px solid #ef4444; padding-bottom: 5px;">
-                                ⭐ {name}
+                                ⭐ AUSGEWÄHLT: {cust_id}
                             </h4>
                             <table style="width: 100%; border-collapse: collapse;">
-                                <tr><td style="padding: 2px 0;"><b>🆔 ID:</b></td><td>{cust_id}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>📊 Sparte:</b></td><td>{row['Sparte']}</td></tr>
-                                <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Postleitzahl', '')} {row.get('Gemeinde', 'Wülfrath')}</td></tr>
+                                <tr><td style="padding: 2px 0;"><b>📍 Ort:</b></td><td>{row.get('Gemeinde', row.get('Ort', 'Wülfrath'))}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>🏠 Adresse:</b></td><td>{row['Straße']} {row['Hausnummer']}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>🏗️ Material:</b></td><td>{row.get('Werkstoff', 'n/a')}</td></tr>
                                 <tr><td style="padding: 2px 0;"><b>⏳ Alter:</b></td><td>{row['Alter']} Jahre</td></tr>
@@ -984,17 +558,13 @@ elif active_tab == tab_labels[1]:
                         ).add_to(m)
                 
                 # Display map inside the c_map column
-                st_folium(m, width="100%", height=700, key="main_network_map", returned_objects=[])
+                st_folium(m, width="100%", height=700, key="main_network_map")
                 
             with c_list:
                 st.markdown(f"#### 📋 Anschluss-Verzeichnis ({len(map_df)})")
-                cols_map = ["Kundenname", "Kundennummer", "Sparte", "Straße", "Hausnummer", "Risiko", "Alter", "Netz-Karte", "lat", "lon"]
-                available_map_cols = [c for c in cols_map if c in map_df.columns]
-                
                 event_map = st.dataframe(
-                    map_df[available_map_cols],
+                    map_df[["Kundennummer", "Sparte", "Straße", "Hausnummer", "Risiko", "Alter", "Netz-Karte", "lat", "lon"]],
                     column_config={
-                        "Kundenname": st.column_config.TextColumn("Kunde", width="medium"),
                         "Kundennummer": st.column_config.TextColumn("ID", width="small"),
                         "Risiko": st.column_config.SelectboxColumn("Risiko", options=["Hoch", "Mittel", "Niedrig", "Unbekannt"]),
                         "Alter": st.column_config.NumberColumn("Alt.", format="%d J."),
@@ -1011,6 +581,7 @@ elif active_tab == tab_labels[1]:
                 
                 if event_map and event_map.selection.rows:
                     idx = event_map.selection.rows[0]
+                    # Only rerun if selection actually changed
                     if st.session_state.last_map_idx != idx:
                         row_map = map_df.iloc[idx]
                         if pd.notna(row_map["lat"]) and pd.notna(row_map["lon"]):
@@ -1021,7 +592,7 @@ elif active_tab == tab_labels[1]:
                             st.rerun()
         else:
             st.warning("⚠️ **Keine Daten auf Karte anzeigbar.**")
-            st.info("Bitte stellen Sie sicher, dass die Excel-Spalten für Latitude/Longitude ausgefüllt sind.")
+            st.info("Bitte stellen Sie sicher, dass die Excel-Spalten für Latitude/Longitude ausgefüllt sind und klicken Sie in der Sidebar auf **'🔄 KI-Speicher aktualisieren'**.")
 
 elif active_tab == tab_labels[2]:
     with tab_container:
@@ -1036,46 +607,8 @@ elif active_tab == tab_labels[2]:
 
 elif active_tab == tab_labels[3]:
     with tab_container:
-        st.markdown("### 🤖 KI -Assistent")
+        st.markdown("### 🤖 AI -Assistent")
         
-        # --- Automatic KB Refresh on Tab Entry ---
-        if engine.vs.count() == 0 and not st.session_state.get("kb_auto_tried", False):
-            st.session_state.kb_auto_tried = True
-            with st.status("🚀 KI-Assistent wird vorbereitet...", expanded=True) as status:
-                st.write("Lese Excel-Daten und indiziere KI-Speicher...")
-                # Force a hard reset of all caches
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                invalidate_cache()
-                
-                # Re-instantiate engine to ensure everything is fresh
-                new_engine = get_engine()
-                count = new_engine.init_or_refresh_kb(reset=True)
-                
-                if count > 0:
-                    status.update(label=f"✅ {count} Datensätze erfolgreich indiziert!", state="complete")
-                    time.sleep(1) # Visual confirmation
-                    st.rerun()
-                else:
-                    status.update(label="⚠️ Keine Daten zur Indizierung gefunden.", state="error")
-                    st.warning("Bitte stellen Sie sicher, dass die Excel-Datei Daten enthält und nicht von einem anderen Programm blockiert wird.")
-        
-        # --- Action Handler (State Update before Rendering) ---
-        if st.session_state.pending_action:
-            pa = st.session_state.pending_action
-            if pa.get("type") == "navigate_map":
-                # Save map data linked to latest bot message index
-                msg_idx = len(st.session_state.history) - 1
-                st.session_state.inline_map_messages[msg_idx] = {
-                    "lat": pa["args"]["lat"],
-                    "lon": pa["args"]["lon"],
-                    "customer_id": pa["args"]["customer_id"]
-                }
-                st.session_state.pending_action = None
-            elif pa.get("type") == "navigate_map_general":
-                st.session_state.pending_action = None
-                navigate_to(tab_labels[1], "All")
-
         col1, col2 = st.columns([2.5, 1.5])
         
         # Action Buttons Row
@@ -1095,28 +628,27 @@ elif active_tab == tab_labels[3]:
                 "Bei welchen Anschlüssen fehlen wesentliche Dokumente?",
                 "Welche Anschlussarten/Materialien wurden wann verbaut?",
                 "Welche Hausanschlüsse haben erhöhtes Schadensrisiko?",
+                "Zusammenhänge Baujahr, Material & Störungswahrscheinlichkeit?",
                 "Welche Hausanschlüsse sollten bald erneuert werden?",
                 "Welche Erneuerungen lassen sich bündeln?",
                 "Welche Anschlüsse sind für Wärmepumpen/EV ungeeignet?",
                 "Welche Muster fallen in den Hausanschlussakten auf?",
                 "Welches Material hat welche Nutzungsdauer in Jahren?",
                 "Welche Störungen sind an welchen Anschlüssen aufgetreten?",
-                "Nach wie vielen Jahren Erneuerung für Wasser/PE?"
+                "Nach wie vielen Jahren Erneuerung für Sparte 10/Material?"
             ]
             
             with st.container(height=500):
                 for q in suggested_queries:
                     if st.button(q, key=f"q_{q}", use_container_width=True):
                         st.session_state.history.append({"role": "user", "content": q})
-                        with st.spinner("KI analysiert strategische Daten..."):
+                        with st.spinner("AI analysiert strategische Daten..."):
                             res = engine.answer_question(q, utility=selected_utility if selected_utility != "Alle Sparten" else None)
                             st.session_state.history.append({"role": "bot", "content": res["answer"]})
                             st.session_state.speak_text = res["answer"]
                             st.session_state.speak_id += 1
                             if "pending_action" in res:
                                  st.session_state.pending_action = res["pending_action"]
-                            if "download_data" in res:
-                                 st.session_state.history[-1]["download_data"] = res["download_data"]
                         st.rerun()
 
         with col1:
@@ -1125,80 +657,51 @@ elif active_tab == tab_labels[3]:
                 if not st.session_state.history:
                     st.info("Willkommen! Wählen Sie eine Frage rechts aus oder tippen Sie unten eine eigene Anfrage.")
                 else:
-                    for i, msg in enumerate(st.session_state.history):
+                    for msg in st.session_state.history:
                         div_class = "user-msg" if msg["role"] == "user" else "bot-msg"
                         st.markdown(f'<div class="{div_class}">{msg["content"]}</div>', unsafe_allow_html=True)
-                        
-                        if "download_data" in msg:
-                            # Use Base64 encoded link to bypass browser GUID naming issues
-                            import base64
-                            b64 = base64.b64encode(msg["download_data"]).decode()
-                            filename = "energiedaten_export.csv"
-                            href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" class="download-link">📥 Daten herunterladen (Excel/CSV)</a>'
-                            st.markdown(f"""
-                                <style>
-                                .download-link {{
-                                    display: inline-block;
-                                    padding: 8px 16px;
-                                    background-color: #3b82f6;
-                                    color: white !important;
-                                    text-decoration: none;
-                                    border-radius: 8px;
-                                    font-size: 13px;
-                                    font-weight: 600;
-                                    margin-top: 8px;
-                                    border: 1px solid #2563eb;
-                                    transition: background 0.2s;
-                                }}
-                                .download-link:hover {{
-                                    background-color: #2563eb;
-                                }}
-                                </style>
-                                {href}
-                            """, unsafe_allow_html=True)
-                        
-                        # (Removed inline map rendering as per revert request)
-            # Render confirmation cards OUTSIDE the scrollable container
-            if st.session_state.pending_action and st.session_state.pending_action.get("type") == "update_asset":
+            
+            # Render confirmation card OUTSIDE the scrollable container so buttons work
+            if st.session_state.pending_action:
                 pa = st.session_state.pending_action
                 args = pa["args"]
                 with st.container():
-                        st.markdown(f"""
-                        <div style="background:#fff7ed; border:2px solid #fdba74; padding:15px; border-radius:12px; margin-top:10px;">
-                            <h5 style="margin:0; color:#9a3412;">🛠️ Daten-Aktualisierung bestätigen</h5>
-                            <p style="font-size:13px; margin:8px 0;">Soll folgende Änderung gespeichert werden?</p>
-                            <ul style="font-size:13px; margin:0; padding-left:20px;">
-                                <li><b>Kunde:</b> {args.get('customer_id')}</li>
-                                <li><b>Feld:</b> {args.get('field_name')}</li>
-                                <li><b>Neuer Wert:</b> {args.get('new_value')}</li>
-                                <li><b>Sparte:</b> {args.get('utility')}</li>
-                            </ul>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        c1, c2 = st.columns(2)
-                        if c1.button("✅ Bestätigen & Speichern", use_container_width=True, type="primary"):
-                            from geo_utils import update_excel_record
-                            success = update_excel_record(
-                                args.get("customer_id"), 
-                                args.get("utility"), 
-                                args.get("field_name"), 
-                                args.get("new_value")
-                            )
-                            if success:
-                                st.success("✅ Daten erfolgreich aktualisiert!")
-                                st.session_state.history.append({"role": "bot", "content": "✅ Die Daten wurden erfolgreich im Excel-System aktualisiert."})
-                                st.session_state.pending_action = None
-                                st.cache_resource.clear()
-                                st.cache_data.clear()
-                                st.rerun()
-                            else:
-                                st.error("Fehler beim Aktualisieren. Prüfen Sie ob die Datei geöffnet ist.")
-                                st.warning(f"Debug: ID={args.get('customer_id')}, Feld={args.get('field_name')}, Sparte={args.get('utility')}")
-                        
-                        if c2.button("❌ Abbrechen", use_container_width=True):
-                            st.session_state.pending_action = None
-                            st.session_state.history.append({"role": "bot", "content": "Die Aktualisierung wurde abgebrochen."})
-                            st.rerun()
+                    st.markdown(f"""
+                    <div style="background:#fff7ed; border:2px solid #fdba74; padding:15px; border-radius:12px; margin-top:10px;">
+                        <h5 style="margin:0; color:#9a3412;">🛠️ Daten-Aktualisierung bestätigen</h5>
+                        <p style="font-size:13px; margin:8px 0;">Soll folgende Änderung gespeichert werden?</p>
+                        <ul style="font-size:13px; margin:0; padding-left:20px;">
+                            <li><b>Kunde:</b> {args.get('customer_id')}</li>
+                            <li><b>Feld:</b> {args.get('field_name')}</li>
+                            <li><b>Neuer Wert:</b> {args.get('new_value')}</li>
+                            <li><b>Sparte:</b> {args.get('utility')}</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+                c1, c2 = st.columns(2)
+                if c1.button("✅ Bestätigen & Speichern", use_container_width=True, type="primary"):
+                    from geo_utils import update_excel_record
+                    success = update_excel_record(
+                        args.get("customer_id"), 
+                        args.get("utility"), 
+                        args.get("field_name"), 
+                        args.get("new_value")
+                    )
+                    if success:
+                        st.success("✅ Daten erfolgreich aktualisiert!")
+                        st.session_state.history.append({"role": "bot", "content": "✅ Die Daten wurden erfolgreich im Excel-System aktualisiert."})
+                        st.session_state.pending_action = None
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Fehler beim Aktualisieren. Prüfen Sie ob die Datei geöffnet ist.")
+                        st.warning(f"Debug: ID={args.get('customer_id')}, Feld={args.get('field_name')}, Sparte={args.get('utility')}")
+                
+                if c2.button("❌ Abbrechen", use_container_width=True):
+                    st.session_state.pending_action = None
+                    st.session_state.history.append({"role": "bot", "content": "Die Aktualisierung wurde abgebrochen."})
+                    st.rerun()
         # Floating Voice Input & Stop Button
         with st.container():
             st.markdown('<div style="position:fixed; bottom:75px; right:70px; font-size:10px; color:#64748b; z-index:1001;">Click to Talk</div>', unsafe_allow_html=True)
@@ -1246,19 +749,17 @@ elif active_tab == tab_labels[3]:
                         transcription = res_voice["text"]
                         st.session_state.history.append({"role": "user", "content": transcription})
                         with st.spinner("KI verarbeitet Sprachbefehl..."):
-                            res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None, history=st.session_state.history)
+                            res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None)
                             st.session_state.history.append({"role": "bot", "content": res["answer"]})
                             st.session_state.speak_text = res["answer"]
                             st.session_state.speak_id += 1
                             if "pending_action" in res:
                                  st.session_state.pending_action = res["pending_action"]
-                            if "download_data" in res:
-                                 st.session_state.history[-1]["download_data"] = res["download_data"]
                         st.rerun()
                     elif isinstance(res_voice, str): # Legacy compatibility if cache is stuck
                         transcription = res_voice
                         st.session_state.history.append({"role": "user", "content": transcription})
-                        res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None, history=st.session_state.history)
+                        res = engine.answer_question(transcription, utility=selected_utility if selected_utility != "Alle Sparten" else None)
                         st.session_state.history.append({"role": "bot", "content": res["answer"]})
                         st.session_state.speak_text = res["answer"]
                         st.session_state.speak_id += 1
@@ -1270,17 +771,15 @@ elif active_tab == tab_labels[3]:
                         st.warning(f"⚠️ **Spracherkennung fehlgeschlagen:** {error_msg}")
                         st.info("💡 **Tipp:** Bitte nutzen Sie links 'KI-Speicher aktualisieren' falls der Fehler bleibt.")
 
-        if user_p := st.chat_input("Fragen Sie den KI-Assistenten nach Materialien, Risiken oder Objekt-Details..."):
+        if user_p := st.chat_input("Fragen Sie den AI-Assistenten nach Materialien, Risiken oder Objekt-Details..."):
             st.session_state.history.append({"role": "user", "content": user_p})
             with st.spinner("KI verarbeitet Anfrage..."):
-                res = engine.answer_question(user_p, utility=selected_utility if selected_utility != "Alle Sparten" else None, history=st.session_state.history)
+                res = engine.answer_question(user_p, utility=selected_utility if selected_utility != "Alle Sparten" else None)
                 st.session_state.history.append({"role": "bot", "content": res["answer"]})
                 st.session_state.speak_text = res["answer"]
                 st.session_state.speak_id += 1
                 if "pending_action" in res:
-                    st.session_state.pending_action = res["pending_action"]
-                if "download_data" in res:
-                     st.session_state.history[-1]["download_data"] = res["download_data"]
+                     st.session_state.pending_action = res["pending_action"]
             st.rerun()
 
 # ─────────────── Auto-Playback Trigger ────────────────────────────────

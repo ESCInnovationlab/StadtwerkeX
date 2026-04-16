@@ -1,0 +1,40 @@
+@keyframes energy-flow-anim {
+  from {
+    stroke-dashoffset: 48;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.energy-flow {
+  animation: energy-flow-anim 1.2s linear infinite !important;
+}
+
+.map-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 20px;
+  margin-bottom: 20px;
+}
+
+.control-info {
+  font-size: 0.9rem;
+  color: var(--text-main);
+}
+
+.map-popup {
+  font-family: 'Outfit', sans-serif;
+}
+
+.map-popup h4 {
+  margin: 0 0 8px 0;
+  border-bottom: 2px solid var(--color-primary);
+  padding-bottom: 4px;
+}
+
+.map-popup p {
+  margin: 4px 0;
+  font-size: 0.85rem;
+}

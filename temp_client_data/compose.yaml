@@ -1,0 +1,19 @@
+name: energybot-offline
+services:
+  app:
+    build: .
+    image: energybot_offline:latest
+    container_name: energybot_offline
+    ports:
+      - "8600:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./excel_data:/app/excel_data
+      - ./cache:/app/cache
+      - ./chroma_db:/app/chroma_db
+      - ./app.py:/app/app.py
+      - ./rag_engine.py:/app/rag_engine.py
+      - ./geo_utils.py:/app/geo_utils.py
+      - ./pages:/app/pages
+    restart: unless-stopped

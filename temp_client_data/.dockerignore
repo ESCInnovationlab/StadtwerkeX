@@ -1,0 +1,7 @@
+__pycache__/
+cache/
+excel_data/*
+*.xlsx
+*.csv
+.env
+chroma_db/
