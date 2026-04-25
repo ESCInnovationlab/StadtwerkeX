@@ -1,0 +1,195 @@
+.topnav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 40px;
+    height: 56px;
+    background: rgba(5, 5, 5, 0.96);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    backdrop-filter: blur(12px);
+}
+
+.topnav-brand {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-decoration: none;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    transition: color 0.2s;
+    flex-shrink: 0;
+}
+
+.topnav-brand:hover,
+.topnav-brand.active {
+    color: #ffffff;
+}
+
+.topnav-links {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+}
+
+.topnav-link {
+    padding: 6px 16px;
+    border-radius: 7px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+    letter-spacing: 0.2px;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+
+.topnav-link:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+.topnav-link.active {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.topnav-link--icon {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.topnav-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 16px;
+    flex-shrink: 0;
+}
+
+.topnav-lang {
+    padding: 5px 13px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: transparent;
+    color: #cccccc;
+    font-family: var(--font-main);
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.topnav-lang:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.5);
+    color: #ffffff;
+}
+
+.topnav-theme {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: transparent;
+    color: #cccccc;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.topnav-theme:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.5);
+    color: #ffffff;
+}
+
+/* ─── Light mode overrides ───────────────────────────────────────────────────── */
+[data-theme="light"] .topnav {
+    background: rgba(255, 255, 255, 0.97);
+    border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .topnav-brand {
+    color: #64748b;
+}
+
+[data-theme="light"] .topnav-brand:hover,
+[data-theme="light"] .topnav-brand.active {
+    color: #0f172a;
+}
+
+[data-theme="light"] .topnav-link {
+    color: #64748b;
+}
+
+[data-theme="light"] .topnav-link:hover {
+    color: #0f172a;
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="light"] .topnav-link.active {
+    color: #0f172a;
+    background: rgba(0, 0, 0, 0.07);
+    border-color: rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="light"] .topnav-lang {
+    border-color: rgba(0, 0, 0, 0.2);
+    color: #374151;
+}
+
+[data-theme="light"] .topnav-lang:hover {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.4);
+    color: #0f172a;
+}
+
+[data-theme="light"] .topnav-theme {
+    border-color: rgba(0, 0, 0, 0.2);
+    color: #374151;
+}
+
+[data-theme="light"] .topnav-theme:hover {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.4);
+    color: #0f172a;
+}
+
+@media (max-width: 900px) {
+    .topnav {
+        padding: 0 16px;
+    }
+    .topnav-link {
+        padding: 5px 10px;
+        font-size: 0.78rem;
+    }
+}
+
+@media (max-width: 640px) {
+    .topnav-brand span {
+        display: none;
+    }
+    .topnav-links {
+        gap: 2px;
+    }
+    .topnav-link {
+        padding: 5px 8px;
+        font-size: 0.73rem;
+    }
+}

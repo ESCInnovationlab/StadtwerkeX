@@ -12,8 +12,18 @@ from schema_map import normalise_columns, validate_required_columns
 
 # ── Paths ──────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(__file__)
-EXCEL_FILE = os.path.join(BASE_DIR, "excel_data", "Hausanschluss_data.xlsx")
-DEFAULT_EXCEL_PATH = EXCEL_FILE # Alias for compatibility
+_env_data_file = os.environ.get("DATA_FILE", "")
+EXCEL_FILE = (
+    os.path.join(BASE_DIR, _env_data_file)
+    if _env_data_file
+    else os.path.join(BASE_DIR, "data", "stadtwerke_synthetic_2300rows.xlsx")
+)
+# Legacy fallback: if the resolved path doesn't exist, try the old location
+if not os.path.exists(EXCEL_FILE):
+    _legacy = os.path.join(BASE_DIR, "excel_data", "Hausanschluss_data.xlsx")
+    if os.path.exists(_legacy):
+        EXCEL_FILE = _legacy
+DEFAULT_EXCEL_PATH = EXCEL_FILE  # Alias for compatibility
 GEO_CACHE_FILE = os.path.join(BASE_DIR, "cache", "geo_cache.json")
 ALL_UTILITIES = ["Gas", "Wasser"]
 CSV_FILES = {u: EXCEL_FILE for u in ALL_UTILITIES}

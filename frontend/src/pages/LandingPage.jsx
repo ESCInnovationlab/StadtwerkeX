@@ -32,7 +32,7 @@ export default function LandingPage() {
                 <Stars radius={300} depth={60} count={20000} factor={7} saturation={0} fade speed={1} />
                 
                 <Suspense fallback={null}>
-                    <EarthGroup />
+                    <EarthGroup highlightGermany />
                     <CameraRig isZooming={isZooming} onComplete={onZoomComplete} />
                 </Suspense>
             </Canvas>

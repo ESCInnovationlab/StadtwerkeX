@@ -1447,6 +1447,15 @@ class EnergyRAG:
             if df_res:
                 return df_res
 
+        if OFFLINE:
+            return {
+                "answer": (
+                    "KI-Assistent ist im Offline-Modus. "
+                    "Bitte stellen Sie eine Internetverbindung her, um AI-Antworten zu erhalten."
+                ),
+                "hits": [], "model_used": "Offline-Mode", "switched": False
+            }
+
         status = self.check_llm_status()
         if not status["ok"]:
             return {

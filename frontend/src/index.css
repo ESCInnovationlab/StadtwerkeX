@@ -2,33 +2,33 @@
 
 :root {
   --font-main: 'Outfit', sans-serif;
-  
-  /* Primary Palette - RED & PURPLE THEME */
-  --color-primary: #ef4444; /* Red 500 */
-  --color-primary-dark: #dc2626; /* Red 600 */
-  --color-primary-glow: rgba(239, 68, 68, 0.3);
-  
-  --color-secondary: #000000; /* Black for red/black gradients */
+
+  /* Primary Palette - BLACK & WHITE THEME */
+  --color-primary: #ffffff;
+  --color-primary-dark: #e0e0e0;
+  --color-primary-glow: rgba(255, 255, 255, 0.1);
+
+  --color-secondary: #000000;
   --color-success: #10b981;
   --color-warning: #f59e0b;
-  --color-danger: #b91c1c;
+  --color-danger: #ef4444;
   --color-strom: #eab308;
   --color-strom-glow: rgba(234, 179, 8, 0.4);
-  
+
   /* Layout Colors */
   --bg-landing: #000000;
-  --bg-dashboard: #0a0a0a; /* Deep black */
-  --bg-sidebar: rgba(10, 10, 10, 0.95);
-  
+  --bg-dashboard: #050505;
+  --bg-sidebar: rgba(8, 8, 8, 0.97);
+
   /* Glassmorphism */
-  --glass-bg: rgba(20, 20, 20, 0.8);
-  --glass-border: rgba(239, 68, 68, 0.3);
-  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
-  
+  --glass-bg: rgba(18, 18, 18, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6);
+
   /* Text */
-  --text-main: #ffffff; /* White text on black */
-  --text-muted: #a1a1aa;
-  --text-light: #f4f4f5;
+  --text-main: #ffffff;
+  --text-muted: #888888;
+  --text-light: #cccccc;
 }
 
 * {
@@ -55,20 +55,20 @@ body {
   background: var(--glass-bg);
   backdrop-filter: blur(12px);
   border: 1px solid var(--glass-border);
-  border-radius: 20px;
+  border-radius: 16px;
   box-shadow: var(--glass-shadow);
   transition: transform 0.3s ease, box-shadow 0.3s ease;
 }
 
 .glass-card:hover {
-  transform: translateY(-5px);
-  box-shadow: 0 15px 45px 0 rgba(31, 38, 135, 0.12);
+  transform: translateY(-3px);
+  box-shadow: 0 16px 48px 0 rgba(0, 0, 0, 0.5);
 }
 
-/* 3D Button Utility */
+/* Button Utilities */
 .btn-premium {
   padding: 12px 24px;
-  border-radius: 12px;
+  border-radius: 10px;
   border: none;
   font-family: var(--font-main);
   font-weight: 600;
@@ -81,30 +81,31 @@ body {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
-  color: white;
-  box-shadow: 0 4px 14px 0 rgba(239, 68, 68, 0.3);
+  background: #ffffff;
+  color: #000000;
+  box-shadow: 0 4px 14px 0 rgba(255, 255, 255, 0.15);
 }
 
 .btn-primary:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 6px 20px rgba(255, 255, 255, 0.25);
 }
 
 .btn-outline {
   background: transparent;
-  border: 1px solid var(--color-primary);
-  color: var(--color-primary);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
 }
 
 .btn-outline:hover {
-  background: rgba(59, 130, 246, 0.05);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: #ffffff;
   transform: translateY(-2px);
 }
 
 /* Scrollbar Styling */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -112,11 +113,43 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #333333;
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
+  background: #555555;
+}
+
+/* ─── Light theme variable overrides ─────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg-landing: #f8fafc;
+  --bg-dashboard: #f0f4f8;
+  --bg-sidebar: rgba(255, 255, 255, 0.98);
+  --glass-bg: rgba(255, 255, 255, 0.92);
+  --glass-border: rgba(0, 0, 0, 0.08);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1);
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --text-light: #334155;
+  --color-primary: #0f172a;
+  --color-primary-glow: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] body {
+  background: var(--bg-dashboard);
+  color: var(--text-main);
+}
+
+[data-theme="light"] .glass-card:hover {
+  box-shadow: 0 16px 48px 0 rgba(0, 0, 0, 0.12);
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
 

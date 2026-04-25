@@ -1,0 +1,235 @@
+.home-page {
+    display: flex;
+    flex-direction: column;
+    gap: 40px;
+}
+
+/* Hero */
+.home-hero {
+    padding: 48px 0 16px;
+}
+
+.home-hero-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+}
+
+.home-hero-title {
+    font-size: 3.5rem;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: -2px;
+    line-height: 1;
+    margin-bottom: 16px;
+}
+
+.home-hero-sub {
+    font-size: 1.05rem;
+    color: var(--text-muted);
+    max-width: 560px;
+    line-height: 1.7;
+}
+
+/* About */
+.home-about {
+    padding: 36px 40px;
+}
+
+.home-about-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 48px;
+}
+
+.home-about-col h2 {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+}
+
+.home-about-col p {
+    font-size: 0.95rem;
+    color: var(--text-light);
+    line-height: 1.75;
+}
+
+.home-feature-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.home-feature-list li {
+    font-size: 0.9rem;
+    color: var(--text-light);
+    padding-left: 16px;
+    position: relative;
+    line-height: 1.5;
+}
+
+.home-feature-list li::before {
+    content: '—';
+    position: absolute;
+    left: 0;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    top: 2px;
+}
+
+.home-utility-badge {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.home-utility-badge strong {
+    color: #ffffff;
+    font-weight: 700;
+}
+
+/* KPI Section */
+.home-section-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+}
+
+.home-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+}
+
+.home-kpi-card {
+    padding: 28px 24px;
+    text-decoration: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+    cursor: pointer;
+}
+
+.home-kpi-card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
+}
+
+.home-kpi-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.home-kpi-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    border: 1px solid;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.home-kpi-value {
+    font-size: 2.2rem;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.home-kpi-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-muted);
+}
+
+.home-kpi-desc {
+    font-size: 0.85rem;
+    color: #666666;
+    line-height: 1.6;
+    flex: 1;
+}
+
+.home-kpi-cta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    transition: color 0.2s;
+    margin-top: 4px;
+}
+
+.home-kpi-card:hover .home-kpi-cta {
+    color: #ffffff;
+}
+
+/* ─── Light mode overrides ───────────────────────────────────────────────────── */
+[data-theme="light"] .home-hero-title {
+    color: #0f172a;
+}
+
+[data-theme="light"] .home-kpi-card:hover {
+    border-color: rgba(0, 0, 0, 0.18);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.12);
+}
+
+[data-theme="light"] .home-kpi-icon {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+[data-theme="light"] .home-kpi-desc {
+    color: #6b7280;
+}
+
+[data-theme="light"] .home-kpi-card:hover .home-kpi-cta {
+    color: #0f172a;
+}
+
+[data-theme="light"] .home-utility-badge {
+    border-top-color: rgba(0, 0, 0, 0.07);
+}
+
+[data-theme="light"] .home-utility-badge strong {
+    color: #0f172a;
+}
+
+@media (max-width: 1200px) {
+    .home-kpi-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .home-hero-title {
+        font-size: 2.5rem;
+    }
+    .home-about {
+        padding: 24px;
+    }
+    .home-about-grid {
+        grid-template-columns: 1fr;
+        gap: 28px;
+    }
+    .home-kpi-grid {
+        grid-template-columns: 1fr;
+    }
+}

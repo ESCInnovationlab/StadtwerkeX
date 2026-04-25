@@ -1,48 +1,76 @@
 .metric-card {
-  padding: 25px;
-  text-align: center;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+    padding: 24px;
+    text-align: center;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    transition: transform 0.25s ease, border-color 0.25s ease;
+}
+
+.metric-card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(255, 255, 255, 0.2);
 }
 
 .metric-value {
-  font-size: 2.5rem;
-  font-weight: 800;
-  margin-bottom: 5px;
+    font-size: 2.4rem;
+    font-weight: 800;
+    margin-bottom: 6px;
 }
 
 .metric-label {
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  letter-spacing: 1px;
-  margin-bottom: 8px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 1.5px;
+    margin-bottom: 8px;
 }
 
 .metric-detail {
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: #475569;
-  margin-bottom: 20px;
-  flex: 1;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: #555555;
+    margin-bottom: 20px;
+    flex: 1;
 }
 
 .metric-btn {
-  background: transparent;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  transition: all 0.2s;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 7px;
+    padding: 6px 12px;
+    font-family: var(--font-main);
+    font-size: 0.73rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s;
 }
 
 .metric-card:hover .metric-btn {
-  background: white;
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+    background: rgba(255, 255, 255, 0.07);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+}
+
+/* ─── Light mode overrides ───────────────────────────────────────────────────── */
+[data-theme="light"] .metric-card:hover {
+    border-color: rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="light"] .metric-detail {
+    color: #6b7280;
+}
+
+[data-theme="light"] .metric-btn {
+    border-color: rgba(0, 0, 0, 0.1);
+    color: #64748b;
+}
+
+[data-theme="light"] .metric-card:hover .metric-btn {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.2);
+    color: #0f172a;
 }

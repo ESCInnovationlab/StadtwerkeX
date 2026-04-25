@@ -14,3 +14,6 @@ requirements.txt.txt
 .dockerignore.txt
 docx_content.txt
 cols.txt
+app.log
+*.log
+temp_fastapi.py

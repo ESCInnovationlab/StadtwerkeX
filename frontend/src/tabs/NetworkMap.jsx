@@ -1,329 +1,475 @@
-import React, { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, GeoJSON, Marker, Popup, useMap } from 'react-leaflet';
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import {
+    MapContainer, TileLayer, GeoJSON, Marker, Popup,
+    useMap, Polyline, Tooltip
+} from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useApp } from '../context/AppContext';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
-import './MarkerCluster.css';
 import StreetView3D from '../components/3d/StreetView3D';
 import './NetworkMap.css';
 
-// Define custom icons
-const defaultIcon = new L.Icon({
-    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
-    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-    iconSize: [25, 41],
-    iconAnchor: [12, 41],
-    popupAnchor: [1, -34],
-    shadowSize: [41, 41]
-});
+/* ─── House-shaped marker icons ──────────────────────────────────────────────── */
+const makeHouseIcon = (color, size = 20) => {
+    const w = size;
+    const h = Math.round(size * 1.3);
+    return L.divIcon({
+        className: '',
+        html: `<svg width="${w}" height="${h}" viewBox="0 0 20 26" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 0 5px ${color}bb)">
+            <path d="M10 1.5L19.5 9.5V25H13V17H7V25H0.5V9.5L10 1.5Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.4" stroke-linejoin="round"/>
+            <rect x="7.5" y="17" width="5" height="8" fill="rgba(0,0,0,0.25)" rx="1"/>
+        </svg>`,
+        iconSize:    [w, h],
+        iconAnchor:  [w / 2, h],
+        popupAnchor: [0, -h],
+    });
+};
 
-const redIcon = new L.Icon({
-    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
-    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-    iconSize: [25, 41],
-    iconAnchor: [12, 41],
-    popupAnchor: [1, -34],
-    shadowSize: [41, 41]
-});
+const ICONS = {
+    red:    makeHouseIcon('#ef4444', 22),
+    orange: makeHouseIcon('#f97316', 20),
+    yellow: makeHouseIcon('#eab308', 20),
+    blue:   makeHouseIcon('#3b82f6', 20),
+};
 
-const yellowIcon = new L.Icon({
-    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-yellow.png',
-    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-    iconSize: [25, 41],
-    iconAnchor: [12, 41],
-    popupAnchor: [1, -34],
-    shadowSize: [41, 41]
-});
+const getMarkerIcon = (asset) => {
+    if (asset.Risiko === 'Hoch')   return ICONS.red;
+    if (asset.Risiko === 'Mittel') return ICONS.orange;
+    return asset.Sparte === 'Gas'  ? ICONS.yellow : ICONS.blue;
+};
 
-// Helper component to update map view
-function MapResizer({ center, zoom }) {
+/* ─── OSRM road routing – routes only between GeoJSON pipeline waypoints ──────
+   Routes are requested in parallel; each falls back to a straight line on error.
+   This avoids the building-interception issue (we never route to asset addresses).
+   ─────────────────────────────────────────────────────────────────────────────── */
+async function fetchRoutedPipelines(geoData, activeUtility) {
+    if (!geoData?.features) return { gas: [], water: [] };
+
+    const tasks = [];
+    for (const feat of geoData.features) {
+        const { utility, type } = feat.properties || {};
+        if (type === 'Connection Hub') continue;
+        if (activeUtility !== 'Alle Sparten' && utility !== activeUtility) continue;
+        const geom = feat.geometry;
+        if (!geom) continue;
+
+        const segs = geom.type === 'LineString'      ? [geom.coordinates]
+                   : geom.type === 'MultiLineString' ? geom.coordinates
+                   : [];
+        for (const coords of segs) {
+            if (coords.length >= 2)
+                tasks.push({ kind: utility === 'Gas' ? 'gas' : 'water', coords });
+        }
+    }
+
+    const routeOne = async ({ kind, coords }) => {
+        const straight = coords.map(([lon, lat]) => [lat, lon]);
+        try {
+            // Subsample to ≤10 waypoints so we stay within OSRM free-tier limits
+            let wps = coords;
+            if (coords.length > 10) {
+                const step = (coords.length - 1) / 9;
+                wps = Array.from({ length: 10 }, (_, i) => coords[Math.round(i * step)]);
+            }
+            const coordStr = wps.map(([lon, lat]) => `${lon},${lat}`).join(';');
+            const ctrl = new AbortController();
+            const tid  = setTimeout(() => ctrl.abort(), 4000);
+            const res  = await fetch(
+                `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=full&geometries=geojson`,
+                { signal: ctrl.signal }
+            );
+            clearTimeout(tid);
+            if (!res.ok) return { kind, line: straight };
+            const data = await res.json();
+            if (data.routes?.[0]?.geometry?.coordinates?.length) {
+                return { kind, line: data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]) };
+            }
+        } catch { /* timeout or network error → fall through */ }
+        return { kind, line: straight };
+    };
+
+    // Cap at 40 segments to avoid hammering the free OSRM server
+    const results = await Promise.all(tasks.slice(0, 40).map(routeOne));
+    return {
+        gas:   results.filter(r => r.kind === 'gas').map(r => r.line),
+        water: results.filter(r => r.kind === 'water').map(r => r.line),
+    };
+}
+
+/* ─── Pipeline renderer ──────────────────────────────────────────────────────── */
+function PipelineLayer({ gas, water }) {
+    return (
+        <>
+            {gas.map((line, i) => (
+                <Polyline key={`gas-${i}`} positions={line}
+                    pathOptions={{ color: '#fbbf24', weight: 3.5, opacity: 0.92, dashArray: '10 5', lineCap: 'round', lineJoin: 'round' }}>
+                    <Tooltip sticky className="pipe-tooltip gas-tooltip">⛽ Gas Main Line</Tooltip>
+                </Polyline>
+            ))}
+            {water.map((line, i) => (
+                <Polyline key={`water-${i}`} positions={line}
+                    pathOptions={{ color: '#60a5fa', weight: 3.5, opacity: 0.92, dashArray: '10 5', lineCap: 'round', lineJoin: 'round' }}>
+                    <Tooltip sticky className="pipe-tooltip water-tooltip">💧 Water Main Line</Tooltip>
+                </Polyline>
+            ))}
+        </>
+    );
+}
+
+/* ─── Forces Leaflet to recalculate size after tab mount ────────────────────── */
+function MapResizer() {
     const map = useMap();
     useEffect(() => {
-        if (center) {
-            map.setView(center, zoom || 18, { animate: true });
-        }
+        map.invalidateSize();
+        const t = setTimeout(() => map.invalidateSize(), 300);
+        return () => clearTimeout(t);
+    }, [map]);
+    return null;
+}
+
+/* ─── Map fly-to helper ──────────────────────────────────────────────────────── */
+function MapFocuser({ center, zoom }) {
+    const map = useMap();
+    useEffect(() => {
+        if (center) map.flyTo(center, zoom || 17, { duration: 1.2, easeLinearity: 0.25 });
     }, [center, zoom, map]);
     return null;
 }
 
-export default function NetworkMap() {
+/* ─── Filter helper ──────────────────────────────────────────────────────────── */
+function applyFilter(assets, filterConfig) {
+    if (!filterConfig) return assets;
+    return assets.filter(a => {
+        if (filterConfig.risiko    && a.Risiko    !== filterConfig.risiko)    return false;
+        if (filterConfig.sparte    && a.Sparte    !== filterConfig.sparte)    return false;
+        if (filterConfig.werkstoff && a.Werkstoff !== filterConfig.werkstoff) return false;
+        if (filterConfig.ageMin    && (a.Alter || 0) < filterConfig.ageMin)   return false;
+        if (filterConfig.overLifespan) {
+            const r = a['Erneuerung_empfohlen_bis'];
+            if (!r || r >= 2026) return false;
+        }
+        if (filterConfig.unsuitable && !a['Infrastruktur_ungeeignet']) return false;
+        return true;
+    });
+}
+
+/* ─── Risk badge component ───────────────────────────────────────────────────── */
+function RiskBadge({ risk }) {
+    const cls   = { Hoch: 'high', Mittel: 'medium', Niedrig: 'low' }[risk] || 'unknown';
+    const label = { Hoch: '⚠ High', Mittel: '◈ Medium', Niedrig: '✓ Low' }[risk] || risk;
+    return <span className={`nm-risk-badge ${cls}`}>{label}</span>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MAIN COMPONENT
+   ═══════════════════════════════════════════════════════════════════════════════ */
+export default function NetworkMap({ filterConfig }) {
     const { activeUtility, selectedAsset, setSelectedAsset } = useApp();
-    const [geoData, setGeoData] = useState(null);
-    const [mapFocus, setMapFocus] = useState(null);
-    const [assets, setAssets] = useState([]);
-    const [viewMode, setViewMode] = useState('2D'); // '2D' or '3D'
+    const [geoData,         setGeoData]        = useState(null);
+    const [mapFocus,        setMapFocus]        = useState(null);
+    const [assets,          setAssets]          = useState([]);
+    const [viewMode,        setViewMode]        = useState('2D');
+    const [hoveredAsset,    setHoveredAsset]    = useState(null);
+    const [routedPipelines, setRoutedPipelines] = useState({ gas: [], water: [] });
 
     useEffect(() => {
-        if (selectedAsset && selectedAsset.lat && selectedAsset.lon) {
+        if (selectedAsset?.lat && selectedAsset?.lon)
             setMapFocus([selectedAsset.lat, selectedAsset.lon]);
-        }
     }, [selectedAsset]);
 
     useEffect(() => {
         fetch('/data/utility_networks.geojson')
-            .then(res => res.json())
-            .then(data => setGeoData(data))
-            .catch(err => console.error("Map Data Error:", err));
-            
+            .then(r => r.json()).then(setGeoData)
+            .catch(e => console.error('GeoJSON:', e));
         fetch(`http://localhost:8000/api/assets?utility=${activeUtility}`)
-            .then(res => res.json())
-            .then(data => setAssets(data.records || []))
-            .catch(err => console.error("Assets Map Fetch Error:", err));
+            .then(r => r.json()).then(d => setAssets(d.records || []))
+            .catch(e => console.error('Assets:', e));
     }, [activeUtility]);
 
-    const getStyle = (feature) => {
-        const props = feature.properties;
-        const utility = props.utility;
-        const type = props.type;
-        
-        // Hide point features (handled by pointToLayer)
-        if (type === 'Connection Hub') return {};
+    // Fetch road-snapped pipeline routes whenever base data changes
+    useEffect(() => {
+        if (!geoData) return;
+        let cancelled = false;
+        fetchRoutedPipelines(geoData, activeUtility).then(result => {
+            if (!cancelled) setRoutedPipelines(result);
+        });
+        return () => { cancelled = true; };
+    }, [geoData, activeUtility]);
 
-        // Filter by activeUtility unless showing all
-        if (activeUtility !== 'Alle Sparten' && utility !== activeUtility) {
-            return { opacity: 0, weight: 0, fillOpacity: 0, interactive: false };
-        }
+    const visibleAssets = useMemo(() => applyFilter(assets, filterConfig), [assets, filterConfig]);
 
-        // When an asset is selected, dim everything not belonging to it
-        if (selectedAsset) {
-            const featureId = props.Kundennummer || props.kundennummer;
-            if (featureId && String(featureId) !== String(selectedAsset.Kundennummer)) {
-                return { opacity: 0.08, weight: 1, color: utility === 'Gas' ? '#eab308' : '#3b82f6', dashArray: '4 8' };
-            }
-        }
+    const handleAssetClick = useCallback((asset) => {
+        setSelectedAsset(asset);
+        setMapFocus([asset.lat, asset.lon]);
+    }, [setSelectedAsset]);
 
-        // Color: Yellow for Gas, Blue for Wasser
-        const baseColor = utility === 'Gas' ? '#eab308' : '#3b82f6';
+    const handleReset = useCallback(() => {
+        setSelectedAsset(null);
+        setViewMode('2D');
+        setMapFocus([51.246, 7.039]);
+    }, [setSelectedAsset]);
 
-        if (type === 'Main Pipe') {
-            return {
-                color: baseColor,
-                weight: selectedAsset ? 5 : 4,
-                opacity: 0.95,
-                dashArray: '8 6',
-                lineCap: 'round',
-                lineJoin: 'round',
-            };
-        }
-
-        // Lateral
-        return {
-            color: baseColor,
-            weight: selectedAsset ? 4 : 2,
-            opacity: 0.85,
-            dashArray: 'none',
-        };
-    };
-
-    const pointToLayer = (feature, latlng) => {
-        if (feature.properties.type !== 'Connection Hub') return null;
-        const utility = feature.properties.utility;
-        const risk = feature.properties.risiko;
-        const color = utility === 'Gas' ? '#eab308' : '#3b82f6';
-        const borderColor = risk === 'Hoch' ? '#ef4444' : '#1e293b';
-
-        // Filter by activeUtility
+    const hubPointToLayer = useCallback((feature, latlng) => {
+        const { utility, type } = feature.properties || {};
+        if (type !== 'Connection Hub') return null;
         if (activeUtility !== 'Alle Sparten' && utility !== activeUtility) return null;
-
+        const color = utility === 'Gas' ? '#fbbf24' : '#60a5fa';
         return L.marker(latlng, {
             icon: L.divIcon({
                 className: '',
-                html: `<div style="
-                    width: 10px; height: 10px;
-                    background: ${color};
-                    border: 2px solid ${borderColor};
-                    transform: rotate(45deg);
-                    box-shadow: 0 0 4px ${color}88;
-                "></div>`,
-                iconSize: [14, 14],
-                iconAnchor: [7, 7],
+                html: `<div style="width:8px;height:8px;background:${color};border:1.5px solid #0d0d14;transform:rotate(45deg);box-shadow:0 0 6px ${color}99"></div>`,
+                iconSize: [12, 12], iconAnchor: [6, 6],
             }),
         });
-    };
+    }, [activeUtility]);
 
     return (
-        <div className="tab-pane">
-            <div className="map-controls glass-card">
-                <div className="control-info">
+        <div className="nm-root tab-pane">
+
+            {filterConfig && (
+                <div className="nm-filter-banner">
+                    <span className="nm-filter-label">
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                            <path d="M1 2h10M3 6h6M5 10h2" stroke="#fbbf24" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                        {filterConfig.label ?? 'Filtered View'}
+                    </span>
+                    <span className="nm-filter-count">{visibleAssets.length} Connections</span>
+                </div>
+            )}
+
+            <div className="nm-topbar">
+                <div className="nm-title">
+                    <div className="nm-title-dot" />
+                    <span>NETWORK — {activeUtility.toUpperCase()}</span>
+                </div>
+
+                <div className="nm-focus-info">
                     {selectedAsset ? (
                         <>
-                            <strong>📍 Fokus:</strong> {selectedAsset.Kundenname} ({selectedAsset.Straße} {selectedAsset.Hausnummer})
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                <circle cx="6" cy="5" r="2.5" stroke="#22d3ee" strokeWidth="1.2"/>
+                                <path d="M6 8c-2.5 0-4 1.5-4 1.5" stroke="#22d3ee" strokeWidth="1.2" strokeLinecap="round"/>
+                            </svg>
+                            <strong>{selectedAsset.Kundenname}</strong>
+                            <span>·</span>
+                            <span>{selectedAsset['Straße']} {selectedAsset.Hausnummer}</span>
                         </>
                     ) : (
                         <>
-                            <strong>🗺️ Netz-Übersicht:</strong> {activeUtility}
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                <path d="M1 5.5H11M5.5 1V10" stroke="#64748b" strokeWidth="1.2" strokeLinecap="round"/>
+                            </svg>
+                            <span>Wülfrath Overview</span>
+                            {!filterConfig && <span>— {assets.length} connections loaded</span>}
                         </>
                     )}
                 </div>
-                
-                <div style={{ display: 'flex', gap: '10px' }}>
-                    {selectedAsset && (
-                        <div style={{ display: 'flex', background: '#18181b', borderRadius: '8px', padding: '4px', border: '1px solid #3f3f46' }}>
-                            <button 
-                                className={`btn-table ${viewMode === '2D' ? 'active-view' : ''}`}
-                                style={viewMode === '2D' ? { background: '#dc2626', color: 'white', borderColor: '#ef4444' } : { border: 'none', background: 'transparent' }}
-                                onClick={() => setViewMode('2D')}
-                            >
-                                🗺️ 2D Map
-                            </button>
-                            <button 
-                                className={`btn-table ${viewMode === '3D' ? 'active-view' : ''}`}
-                                style={viewMode === '3D' ? { background: '#dc2626', color: 'white', borderColor: '#ef4444' } : { border: 'none', background: 'transparent' }}
-                                onClick={() => setViewMode('3D')}
-                            >
-                                🏘️ 3D Streetview
-                            </button>
-                        </div>
-                    )}
-                    
+
+                <div className="nm-btn-group">
                     {selectedAsset ? (
-                        <button className="btn-table" onClick={() => {
-                            setSelectedAsset(null);
-                            setViewMode('2D');
-                        }}>
-                            🏠 Zurück zur Übersicht
-                        </button>
+                        <>
+                            <button
+                                className={`nm-btn${viewMode === '2D' ? ' active' : ''}`}
+                                onClick={() => setViewMode('2D')}>
+                                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                    <rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.2"/>
+                                    <path d="M1 4h10M4 4v7" stroke="currentColor" strokeWidth="1.2"/>
+                                </svg>
+                                2D Map
+                            </button>
+                            <button
+                                className={`nm-btn${viewMode === '3D' ? ' active' : ''}`}
+                                onClick={() => setViewMode('3D')}>
+                                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                    <path d="M6 1L11 4v4L6 11 1 8V4L6 1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                                </svg>
+                                3D View
+                            </button>
+                            <button className="nm-btn danger" onClick={handleReset}>
+                                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                    <path d="M6 2a4 4 0 1 0 4 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                                    <path d="M10 2v4h-4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                                </svg>
+                                Overview
+                            </button>
+                        </>
                     ) : (
-                        <button className="btn-table" onClick={() => setMapFocus([51.246, 7.039])}>
-                            Wülfrath Zentrum
+                        <button className="nm-btn" onClick={() => setMapFocus([51.246, 7.039])}>
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                                <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2"/>
+                                <circle cx="6" cy="6" r="1.5" fill="currentColor"/>
+                            </svg>
+                            Center
                         </button>
                     )}
                 </div>
             </div>
 
-            <div className="map-canvas" style={{ position: 'relative' }}>
-                {/* Map Legend */}
-                <div style={{
-                    position: 'absolute', bottom: '30px', right: '10px', zIndex: 1000,
-                    background: 'rgba(10,10,10,0.85)', backdropFilter: 'blur(8px)',
-                    padding: '12px 16px', borderRadius: '10px',
-                    border: '1px solid #3f3f46', fontFamily: 'Outfit, sans-serif',
-                    color: 'white', fontSize: '0.8rem',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.5)'
-                }}>
-                    <div style={{ fontWeight: 700, marginBottom: '8px', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.5px', color: '#a1a1aa' }}>Legende</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '5px' }}>
-                        <div style={{ width: '24px', height: '4px', background: '#eab308', borderRadius: '2px' }}></div>
-                        <span>Gas Hauptleitung</span>
+            <div className="nm-canvas">
+
+                {selectedAsset && (
+                    <div className="nm-asset-panel">
+                        <div className="nm-asset-name">{selectedAsset.Kundenname}</div>
+                        <div className="nm-asset-addr">
+                            {selectedAsset['Straße']} {selectedAsset.Hausnummer}
+                        </div>
+                        {[
+                            ['Utility',  selectedAsset.Sparte],
+                            ['Material', selectedAsset.Werkstoff || '—'],
+                            ['Age',      selectedAsset.Alter ? `${selectedAsset.Alter} yrs.` : '—'],
+                        ].map(([k, v]) => (
+                            <div className="nm-asset-row" key={k}>
+                                <span className="nm-asset-key">{k}</span>
+                                <span className="nm-asset-val">{v}</span>
+                            </div>
+                        ))}
+                        <div className="nm-asset-row">
+                            <span className="nm-asset-key">Risk</span>
+                            <RiskBadge risk={selectedAsset.Risiko} />
+                        </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '5px' }}>
-                        <div style={{ width: '24px', height: '4px', background: '#3b82f6', borderRadius: '2px' }}></div>
-                        <span>Wasser Hauptleitung</span>
+                )}
+
+                {!selectedAsset && (
+                    <div className="nm-stats">
+                        <div className="nm-stat-pill">
+                            <div className="nm-stat-dot nm-stat-dot--gas" />
+                            <strong>{assets.filter(a => a.Sparte === 'Gas').length}</strong>
+                            <span>Gas</span>
+                        </div>
+                        <div className="nm-stat-pill">
+                            <div className="nm-stat-dot nm-stat-dot--water" />
+                            <strong>{assets.filter(a => a.Sparte !== 'Gas').length}</strong>
+                            <span>Water</span>
+                        </div>
+                        <div className="nm-stat-pill">
+                            <div className="nm-stat-dot nm-stat-dot--risk" />
+                            <strong>{assets.filter(a => a.Risiko === 'Hoch').length}</strong>
+                            <span>High Risk</span>
+                        </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '5px' }}>
-                        <div style={{ width: '10px', height: '10px', background: '#eab308', transform: 'rotate(45deg)', border: '2px solid #1e293b' }}></div>
-                        <span style={{ paddingLeft: '4px' }}>Gas Anschluss-Hub</span>
+                )}
+
+                <div className="nm-legend">
+                    <div className="nm-legend-title">Legend</div>
+                    <div className="nm-legend-row">
+                        <div className="nm-legend-line nm-legend-line--gas" />
+                        <span>Gas Main Line</span>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <div style={{ width: '10px', height: '10px', background: '#3b82f6', transform: 'rotate(45deg)', border: '2px solid #1e293b' }}></div>
-                        <span style={{ paddingLeft: '4px' }}>Wasser Anschluss-Hub</span>
+                    <div className="nm-legend-row">
+                        <div className="nm-legend-line nm-legend-line--water" />
+                        <span>Water Main Line</span>
+                    </div>
+                    <div className="nm-legend-divider" />
+                    <div className="nm-legend-row">
+                        <svg width="13" height="16" viewBox="0 0 20 26" fill="none" className="nm-legend-house">
+                            <path d="M10 1.5L19.5 9.5V25H13V17H7V25H0.5V9.5L10 1.5Z" fill="#ef4444" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" strokeLinejoin="round"/>
+                        </svg>
+                        <span>High Risk</span>
+                    </div>
+                    <div className="nm-legend-row">
+                        <svg width="13" height="16" viewBox="0 0 20 26" fill="none" className="nm-legend-house">
+                            <path d="M10 1.5L19.5 9.5V25H13V17H7V25H0.5V9.5L10 1.5Z" fill="#f97316" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" strokeLinejoin="round"/>
+                        </svg>
+                        <span>Medium Risk</span>
+                    </div>
+                    <div className="nm-legend-row">
+                        <svg width="13" height="16" viewBox="0 0 20 26" fill="none" className="nm-legend-house">
+                            <path d="M10 1.5L19.5 9.5V25H13V17H7V25H0.5V9.5L10 1.5Z" fill="#eab308" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" strokeLinejoin="round"/>
+                        </svg>
+                        <span>Gas Connection</span>
+                    </div>
+                    <div className="nm-legend-row">
+                        <svg width="13" height="16" viewBox="0 0 20 26" fill="none" className="nm-legend-house">
+                            <path d="M10 1.5L19.5 9.5V25H13V17H7V25H0.5V9.5L10 1.5Z" fill="#3b82f6" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" strokeLinejoin="round"/>
+                        </svg>
+                        <span>Water Connection</span>
                     </div>
                 </div>
 
                 {viewMode === '3D' && selectedAsset ? (
                     <StreetView3D asset={selectedAsset} utility={activeUtility} />
                 ) : (
-                <MapContainer 
-                    center={[51.246, 7.039]} 
-                    zoom={15} 
-                    style={{ height: '100%', width: '100%' }}
-                >
-                    <TileLayer
-                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                        attribution='&copy; OpenStreetMap contributors'
-                    />
-                    
-                    {geoData && (
-                        <GeoJSON 
-                            key={JSON.stringify(activeUtility) + (selectedAsset?.Kundennummer || '')}
-                            data={geoData} 
-                            style={getStyle}
-                            pointToLayer={pointToLayer}
-                            onEachFeature={(feature, layer) => {
-                                if (feature.properties) {
-                                    const p = feature.properties;
-                                    layer.bindPopup(`
-                                        <div class="map-popup">
-                                            <h4>${p.utility} &mdash; ${p.type}</h4>
-                                            <p>Netz: ${p.network || 'N/A'}</p>
-                                            <p>Material: <strong>${p.material || 'N/A'}</strong></p>
-                                            <p>Risiko: <strong style="color:${p.risiko === 'Hoch' ? '#ef4444' : 'inherit'}">${p.risiko || 'N/A'}</strong></p>
-                                            ${p.Kundenname ? `<p>Kunde: <strong>${p.Kundenname}</strong></p>` : ''}
-                                        </div>
-                                    `);
-                                }
-                            }}
-                        />
-                    )}
+                    <MapContainer
+                        center={[51.246, 7.039]}
+                        zoom={15}
+                        style={{ height: '100%', width: '100%' }}
+                        zoomControl>
 
-                    <MapResizer center={mapFocus} />
-                    
-                    <MarkerClusterGroup
-                        chunkedLoading
-                        polygonOptions={{ opacity: 0 }} // Hide the giant polygons
-                    >
-                        {assets.map((asset, idx) => {
-                        const isSelected = selectedAsset && selectedAsset.Kundennummer === asset.Kundennummer;
-                        if (!asset.lat || !asset.lon) return null;
-                        
-                        return (
-                            <Marker 
-                                key={idx} 
-                                position={[asset.lat, asset.lon]}
-                                icon={asset.Risiko === 'Hoch' ? redIcon : asset.Sparte === 'Gas' ? yellowIcon : defaultIcon}
-                                eventHandlers={{
-                                    click: () => {
-                                        setSelectedAsset(asset);
-                                        setMapFocus([asset.lat, asset.lon]);
-                                    }
-                                }}
-                            >
-                                <Popup className="custom-asset-popup">
-                                    <h3 style={{ margin: '0 0 5px 0', borderBottom: '2px solid red', paddingBottom: '5px', fontSize: '1.2em', fontWeight: 'normal' }}>
-                                        {asset.Kundenname || 'Asset'}
-                                    </h3>
-                                    <table style={{ width: '100%', marginTop: '10px', fontSize: '0.95em' }}>
-                                        <tbody>
-                                            <tr>
-                                                <td style={{ padding: '3px 0' }}><span role="img" aria-label="id">🆔</span> <strong>ID:</strong></td>
-                                                <td style={{ padding: '3px 0', paddingLeft: '15px' }}>{asset.Kundennummer}</td>
-                                            </tr>
-                                            <tr>
-                                                <td style={{ padding: '3px 0' }}><span role="img" aria-label="sparte">📊</span> <strong>Sparte:</strong></td>
-                                                <td style={{ padding: '3px 0', paddingLeft: '15px' }}>{asset.Sparte}</td>
-                                            </tr>
-                                            <tr>
-                                                <td style={{ padding: '3px 0' }}><span role="img" aria-label="ort">📍</span> <strong>Ort:</strong></td>
-                                                <td style={{ padding: '3px 0', paddingLeft: '15px' }}>42489 Wülfrath</td>
-                                            </tr>
-                                            <tr>
-                                                <td style={{ padding: '3px 0' }}><span role="img" aria-label="adresse">🏠</span> <strong>Adresse:</strong></td>
-                                                <td style={{ padding: '3px 0', paddingLeft: '15px' }}>{asset.Straße} {asset.Hausnummer}</td>
-                                            </tr>
-                                            <tr>
-                                                <td style={{ padding: '3px 0' }}><span role="img" aria-label="alter">⏳</span> <strong>Alter:</strong></td>
-                                                <td style={{ padding: '3px 0', paddingLeft: '15px' }}>{asset.Alter} {asset.Alter ? 'Jahre' : ''}</td>
-                                            </tr>
-                                            <tr>
-                                                <td style={{ padding: '3px 0' }}><span role="img" aria-label="risiko">⚠️</span> <strong>Risiko:</strong></td>
-                                                <td style={{ 
-                                                    padding: '3px 0', 
-                                                    paddingLeft: '15px',
-                                                    color: asset.Risiko === 'Hoch' ? 'red' : 'inherit',
-                                                    fontWeight: asset.Risiko === 'Hoch' ? 'bold' : 'normal'
-                                                }}>{asset.Risiko}</td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                </Popup>
-                            </Marker>
-                        );
-                    })}
-                    </MarkerClusterGroup>
-                </MapContainer>
+                        <TileLayer
+                            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>'
+                            subdomains="abcd"
+                            maxZoom={20}
+                            keepBuffer={4}
+                        />
+
+                        <MapResizer />
+
+                        <PipelineLayer gas={routedPipelines.gas} water={routedPipelines.water} />
+
+                        {geoData && (
+                            <GeoJSON
+                                key={`hubs-${activeUtility}`}
+                                data={geoData}
+                                style={() => ({ opacity: 0, fillOpacity: 0, weight: 0 })}
+                                pointToLayer={hubPointToLayer}
+                            />
+                        )}
+
+                        <MapFocuser center={mapFocus} zoom={selectedAsset ? 17 : 15} />
+
+                        <MarkerClusterGroup chunkedLoading polygonOptions={{ opacity: 0 }}>
+                            {visibleAssets.map((asset, idx) => {
+                                if (!asset.lat || !asset.lon) return null;
+                                return (
+                                    <Marker
+                                        key={idx}
+                                        position={[asset.lat, asset.lon]}
+                                        icon={getMarkerIcon(asset)}
+                                        eventHandlers={{
+                                            click:     () => handleAssetClick(asset),
+                                            mouseover: () => setHoveredAsset(asset),
+                                            mouseout:  () => setHoveredAsset(null),
+                                        }}>
+                                        <Popup>
+                                            <div className="nm-popup">
+                                                <div className="nm-popup-name">
+                                                    {asset.Kundenname || 'Asset'}
+                                                </div>
+                                                <div className="nm-popup-addr">
+                                                    {asset['Straße']} {asset.Hausnummer}
+                                                </div>
+                                                {[
+                                                    ['Utility',  asset.Sparte],
+                                                    ['Age',      asset.Alter ? `${asset.Alter} years` : '—'],
+                                                    ['Material', asset.Werkstoff || '—'],
+                                                ].map(([k, v]) => (
+                                                    <div className="nm-popup-row" key={k}>
+                                                        <span className="nm-popup-key">{k}</span>
+                                                        <span className="nm-popup-val">{v}</span>
+                                                    </div>
+                                                ))}
+                                                <div className="nm-popup-risk-row">
+                                                    <span className="nm-popup-key">Risk</span>
+                                                    <RiskBadge risk={asset.Risiko} />
+                                                </div>
+                                                <button
+                                                    className="nm-popup-btn"
+                                                    onClick={() => handleAssetClick(asset)}>
+                                                    View details →
+                                                </button>
+                                            </div>
+                                        </Popup>
+                                    </Marker>
+                                );
+                            })}
+                        </MarkerClusterGroup>
+                    </MapContainer>
                 )}
             </div>
         </div>

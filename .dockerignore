@@ -1,7 +1,35 @@
+# Python runtime artifacts
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+
+# Node / frontend build artifacts (frontend has its own Dockerfile)
+frontend/node_modules/
+frontend/dist/
+
+# Data volumes — mounted at runtime via compose.yaml, not baked in
 cache/
-excel_data/*
-*.xlsx
-*.csv
-.env
 chroma_db/
+
+# Dev / scratch files
+scratch/
+temp_client_data/
+*.bat
+*.ps1
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets — injected via env_file in compose.yaml, never in image
+.env

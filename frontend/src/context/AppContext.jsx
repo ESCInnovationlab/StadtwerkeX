@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
 
 const AppContext = createContext();
@@ -6,9 +6,12 @@ const AppContext = createContext();
 export const useApp = () => useContext(AppContext);
 
 export const AppProvider = ({ children }) => {
-    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [isAuthenticated, setIsAuthenticated] = useState(
+        () => localStorage.getItem('sw_auth') === '1'
+    );
     const [activeUtility, setActiveUtility] = useState('Alle Sparten');
     const [kpis, setKpis] = useState(null);
+    const [detailedKpis, setDetailedKpis] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [selectedAsset, setSelectedAsset] = useState(null);
@@ -30,8 +33,12 @@ export const AppProvider = ({ children }) => {
     const fetchKPIs = async () => {
         setLoading(true);
         try {
-            const response = await axios.get(`http://localhost:8000/api/kpis?utility=${activeUtility}`);
-            setKpis(response.data);
+            const [summaryRes, detailedRes] = await Promise.all([
+                axios.get(`http://localhost:8000/api/kpis?utility=${activeUtility}`),
+                axios.get(`http://localhost:8000/api/kpis/detailed?utility=${activeUtility}`),
+            ]);
+            setKpis(summaryRes.data);
+            setDetailedKpis(detailedRes.data);
             setError(null);
         } catch (err) {
             console.error('Failed to fetch KPIs:', err);
@@ -42,9 +49,9 @@ export const AppProvider = ({ children }) => {
     };
 
     const login = (username, password) => {
-        // Mock authentication based on app.py logic
         if (username === 'admin' && password === 'esc_service_2026') {
             setIsAuthenticated(true);
+            localStorage.setItem('sw_auth', '1');
             return true;
         }
         return false;
@@ -52,6 +59,7 @@ export const AppProvider = ({ children }) => {
 
     const logout = () => {
         setIsAuthenticated(false);
+        localStorage.removeItem('sw_auth');
     };
 
     const value = {
@@ -59,6 +67,7 @@ export const AppProvider = ({ children }) => {
         activeUtility,
         setActiveUtility,
         kpis,
+        detailedKpis,
         loading,
         error,
         login,
