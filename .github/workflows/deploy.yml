@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  ACR_NAME: ${{ secrets.ACR_NAME }} # e.g. energybotprod
+  ACR_NAME: ${{ secrets.ACR_NAME }}
   BACKEND_IMAGE_NAME: energybot-backend
   FRONTEND_IMAGE_NAME: energybot-frontend
 
@@ -46,8 +46,14 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy to Azure Web App (App Service)
+      - name: Deploy Backend to Azure App Service
         uses: azure/webapps-deploy@v2
         with:
-          app-name: ${{ secrets.CONTAINER_APP_NAME }}
+          app-name: ${{ secrets.BACKEND_APP_NAME }}
           images: ${{ env.ACR_NAME }}.azurecr.io/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy Frontend to Azure App Service
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.FRONTEND_APP_NAME }}
+          images: ${{ env.ACR_NAME }}.azurecr.io/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
