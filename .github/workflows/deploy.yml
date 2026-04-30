@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  ACR_NAME: ${{ secrets.ACR_NAME }} # e.g. energybotregistry
+  ACR_NAME: ${{ secrets.ACR_NAME }} # e.g. energybotprod
   BACKEND_IMAGE_NAME: energybot-backend
   FRONTEND_IMAGE_NAME: energybot-frontend
 
@@ -46,12 +46,8 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Example for Azure Container Apps deployment
-      # You will need to set up the Container App first
-      - name: Deploy to Azure Container App
-        uses: azure/container-apps-deploy-action@v2
+      - name: Deploy to Azure Web App (App Service)
+        uses: azure/webapps-deploy@v2
         with:
-          acrName: ${{ env.ACR_NAME }}
-          containerAppName: ${{ secrets.CONTAINER_APP_NAME }}
-          resourceGroup: ${{ secrets.RESOURCE_GROUP }}
-          imageToDeploy: ${{ env.ACR_NAME }}.azurecr.io/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
+          app-name: ${{ secrets.CONTAINER_APP_NAME }}
+          images: ${{ env.ACR_NAME }}.azurecr.io/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
