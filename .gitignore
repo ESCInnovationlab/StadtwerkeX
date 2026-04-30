@@ -11,6 +11,7 @@ venv/
 
 # Data and Logs
 excel_data/
+data/
 temp_client_data/
 cache/
 chroma_db/
