@@ -28,6 +28,54 @@ GEO_CACHE_FILE = os.path.join(BASE_DIR, "cache", "geo_cache.json")
 ALL_UTILITIES = ["Gas", "Wasser"]
 CSV_FILES = {u: EXCEL_FILE for u in ALL_UTILITIES}
 
+import time
+
+# ── Performance Cache ──────────────────────────────────────────────────
+_DATA_CACHE = {
+    "raw": None,
+    "mtime": 0,
+    "last_check": 0,
+    "utilities": {},
+    "unified": None,
+    "kpis": {}
+}
+CACHE_TTL = 300  # 5 minutes
+
+def _invalidate_cache():
+    global _DATA_CACHE
+    _DATA_CACHE["raw"] = None
+    _DATA_CACHE["utilities"].clear()
+    _DATA_CACHE["unified"] = None
+    _DATA_CACHE["kpis"].clear()
+
+def _get_raw_data():
+    global _DATA_CACHE
+    if not os.path.exists(EXCEL_FILE):
+        return pd.DataFrame()
+    
+    current_time = time.time()
+    
+    # Check TTL to avoid hammering the disk with os.path.getmtime
+    if _DATA_CACHE["raw"] is not None and (current_time - _DATA_CACHE["last_check"] < CACHE_TTL):
+        return _DATA_CACHE["raw"]
+        
+    mtime = os.path.getmtime(EXCEL_FILE)
+    if _DATA_CACHE["raw"] is not None and _DATA_CACHE["mtime"] == mtime:
+        _DATA_CACHE["last_check"] = current_time
+        return _DATA_CACHE["raw"]
+    
+    # Cache miss or file changed
+    try:
+        df = pd.read_excel(EXCEL_FILE, header=0, engine="openpyxl")
+        df = normalise_columns(df)
+        _invalidate_cache() # Clear downstream caches
+        _DATA_CACHE["raw"] = df
+        _DATA_CACHE["mtime"] = mtime
+        _DATA_CACHE["last_check"] = current_time
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 MATERIAL_LIFESPAN = {
     "PE-HD": 50, "PE": 50, "PE100": 50, "PVC": 40,
     "Kupfer": 60, "Stahl": 65, "Grauguss": 80, "Duktilguss": 80,
@@ -183,6 +231,8 @@ def get_coordinates(row: pd.Series) -> tuple:
     return None, None
 
 def load_excel(path=EXCEL_FILE, header=0):
+    if path == EXCEL_FILE:
+        return _get_raw_data()
     if not os.path.exists(path): return pd.DataFrame()
     df = pd.read_excel(path, header=header, engine="openpyxl")
     df = normalise_columns(df)
@@ -196,23 +246,22 @@ def _has_actual_connection(row: dict, sparte: str) -> bool:
 
 
 def get_utility_df(utility: str) -> pd.DataFrame:
-    if not os.path.exists(EXCEL_FILE): return pd.DataFrame()
-    try:
-        raw = pd.read_excel(EXCEL_FILE, header=0, engine="openpyxl")
-    except: return pd.DataFrame()
+    global _DATA_CACHE
+    raw = _get_raw_data()
+    if raw.empty: return pd.DataFrame()
 
-    # Fix 2.1 / 3.2: normalise column names (strips whitespace + maps variants to canonical names)
-    raw = normalise_columns(raw)
+    if utility in _DATA_CACHE["utilities"]:
+        return _DATA_CACHE["utilities"][utility]
 
     # Fix 2.4: drop permanently null columns
     cols_to_drop = ["Zusatz"]
-    raw = raw.drop(columns=[c for c in cols_to_drop if c in raw.columns])
+    raw_clean = raw.drop(columns=[c for c in cols_to_drop if c in raw.columns])
 
     # Identify utility-specific columns
     common_cols = []
     util_cols = []
-    for c in raw.columns:
-        c_l = c.lower()
+    for c in raw_clean.columns:
+        c_l = str(c).lower()
         if c_l.startswith(utility.lower()):
             util_cols.append(c)
         elif not any(c_l.startswith(u.lower()) for u in ALL_UTILITIES):
@@ -220,14 +269,18 @@ def get_utility_df(utility: str) -> pd.DataFrame:
 
     if not util_cols: return pd.DataFrame()
 
-    df = raw[common_cols + util_cols].copy()
+    df = raw_clean[common_cols + util_cols].copy()
 
-    # Fix 2.3: null-aware connection detection — only keep rows with an actual installation date
-    raw_dicts = raw.to_dict("records")
-    has_connection = pd.Series(
-        [_has_actual_connection(r, utility) for r in raw_dicts],
-        index=raw.index
-    )
+    # Optimized connection detection (Vectorized)
+    conn_col = f"{utility} Einbaudatum/ Fertigmeldung"
+    if conn_col in raw.columns:
+        # Treat various null-like strings as actual NaTs
+        has_connection = raw[conn_col].astype(str).str.strip().replace(
+            ["", "nan", "NaT", "None", "NaN", "0"], pd.NA
+        ).notna()
+    else:
+        has_connection = pd.Series(False, index=raw.index)
+
     df = df[has_connection].copy()
     if df.empty: return pd.DataFrame()
     
@@ -277,10 +330,17 @@ def get_utility_df(utility: str) -> pd.DataFrame:
     
     df["Sparte"] = utility
     
-    # Extract coordinates
-    coords = df.apply(get_coordinates, axis=1)
-    df["lat"] = coords.apply(lambda x: x[0])
-    df["lon"] = coords.apply(lambda x: x[1])
+    # Extract coordinates.
+    # normalise_columns() may have already renamed Breitengrad (Latitude) → lat.
+    # If so, use those values directly; get_coordinates() would return None because
+    # it searches for "Latitude" in the column name which no longer exists.
+    if "lat" in df.columns and "lon" in df.columns and df["lat"].notna().any():
+        df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+        df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    else:
+        coords = df.apply(get_coordinates, axis=1)
+        df["lat"] = coords.apply(lambda x: x[0])
+        df["lon"] = coords.apply(lambda x: x[1])
 
     # ── Final Cleaning ──
     # Clean all string values in the dataframe to handle encoding artifacts
@@ -306,13 +366,23 @@ def get_utility_df(utility: str) -> pd.DataFrame:
     df["missing_inspection"] = df.apply(_missing_inspection, axis=1)
     
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    
+    # Store in cache
+    _DATA_CACHE["utilities"][utility] = df
     return df
 
 def get_unified_df() -> pd.DataFrame:
+    global _DATA_CACHE
+    if _DATA_CACHE["unified"] is not None:
+        return _DATA_CACHE["unified"]
+        
     dfs = [get_utility_df(u) for u in ALL_UTILITIES]
     valid_dfs = [d for d in dfs if not d.empty]
     if not valid_dfs: return pd.DataFrame()
-    return pd.concat(valid_dfs, ignore_index=True)
+    
+    unified = pd.concat(valid_dfs, ignore_index=True)
+    _DATA_CACHE["unified"] = unified
+    return unified
 
 def kpi_advanced(df: pd.DataFrame) -> dict:
     if df.empty: return {k: 0 for k in ["total", "critical", "aging_30", "aging_40", "renewal_soon", "unsuitable", "over_lifespan"]}

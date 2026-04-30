@@ -9,19 +9,39 @@ __pycache__/
 venv/
 .venv/
 
-# Node / frontend build artifacts (frontend has its own Dockerfile)
+# Node / frontend build artifacts
 frontend/node_modules/
 frontend/dist/
 
-# Data volumes — mounted at runtime via compose.yaml, not baked in
+# Large Archives & Handoffs
+*.zip
+EnergyBot_Handoff/
+Client_Handoff/
+
+# Legacy Streamlit Files (Not needed for FastAPI/React stack)
+app.py
+pages/
+landing_3d.html
+run_energybot.bat
+stop_energybot.bat
+setup_client_package.ps1
+README_CLIENT.md
+README_INSTALL_ONLINE.txt
+deployment_guide.md
+github_push_guide.md
+app_issues_report.md
+
+# Data volumes
 cache/
 chroma_db/
+temp_client_data/
+
+# Logs
+*.log
+app.log
 
 # Dev / scratch files
 scratch/
-temp_client_data/
-*.bat
-*.ps1
 
 # Git
 .git/
@@ -31,5 +51,7 @@ temp_client_data/
 .vscode/
 .idea/
 
-# Secrets — injected via env_file in compose.yaml, never in image
+# Secrets
 .env
+.env.template
+.env.example

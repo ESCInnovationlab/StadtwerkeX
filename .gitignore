@@ -1,19 +1,42 @@
+# Environment and Secrets
 .env
+.env.template
+.env.example
+
+# Python
 __pycache__/
 *.pyc
+venv/
+.python-version
+
+# Data and Logs
+excel_data/
+temp_client_data/
 cache/
 chroma_db/
+app.log
+*.log
+
+# Build and Temporary
+frontend/dist/
+frontend/node_modules/
+node_modules/
+dist/
+*.zip
+temp_fastapi.py
+app_issues_report.md
+Client_Handoff.zip
+EnergyBot_Handoff.zip
+
+# Streamlit/UI
 .streamlit/
-test_*.py
-diag_*.py
-check_*.py
-inspect_*.py
-*.bat
-_test_*.py
+
+# Typos and specific files
 requirements.txt.txt
 .dockerignore.txt
 docx_content.txt
 cols.txt
-app.log
-*.log
-temp_fastapi.py
+
+# Local tools
+*.bat
+setup_client_package.ps1
