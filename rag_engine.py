@@ -219,8 +219,11 @@ class EnergyRAG:
         self.embedder = Embedder(embed_model)
 
         # --- Provider-Agnostic LLM Configuration ---
-        self.llm_api_key = os.getenv("LLM_API_KEY", os.getenv("GROQ_API_KEY"))
-        self.llm_model = os.getenv("LLM_MODEL_NAME", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
+        self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+        
+        self.llm_api_key = os.getenv("LLM_API_KEY", os.getenv("AZURE_OPENAI_API_KEY"))
+        self.llm_model = os.getenv("LLM_MODEL_NAME", "gpt-4o")
         self.llm_base_url = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
 
         self.unified_df = get_unified_df()
@@ -312,11 +315,18 @@ class EnergyRAG:
         if not self.llm_api_key:
             return {"ok": False, "msg": "API Key fehlt."}
         try:
-            headers = {"Authorization": f"Bearer {self.llm_api_key}"}
-            resp = requests.get(f"{self.llm_base_url}/models", headers=headers, timeout=5)
+            if self.azure_endpoint:
+                # Basic health check for Azure by trying to hit the completions endpoint with empty payload
+                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2023-05-15"
+                headers = {"api-key": self.llm_api_key}
+                resp = requests.post(url, headers=headers, json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=5)
+            else:
+                headers = {"Authorization": f"Bearer {self.llm_api_key}"}
+                resp = requests.get(f"{self.llm_base_url}/models", headers=headers, timeout=5)
+            
             if resp.status_code == 200:
-                provider_name = "Online" if "groq" in self.llm_base_url else "Custom Provider"
-                return {"ok": True, "msg": f"{provider_name}: {self.llm_model}"}
+                provider = "Azure" if self.azure_endpoint else "Online"
+                return {"ok": True, "msg": f"{provider}: {self.llm_model if not self.azure_endpoint else self.azure_deployment}"}
             return {"ok": False, "msg": f"LLM Error: {resp.status_code}"}
         except Exception as e:
             return {"ok": False, "msg": f"Verbindungsfehler: {str(e)[:50]}"}
@@ -1456,10 +1466,19 @@ STYLE:
                     "content": f"Relevant data from database:\n{ctx}\n\nQuestion: {question}"
                 })
 
-            resp = requests.post(
-                f"{self.llm_base_url}/chat/completions",
-                headers=headers, json=payload, timeout=30
-            )
+            if self.azure_endpoint:
+                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2023-05-15"
+                headers = {"api-key": self.llm_api_key, "Content-Type": "application/json"}
+                # Azure doesn't like 'model' parameter in payload for some deployments
+                if "model" in payload: del payload["model"]
+            else:
+                url = f"{self.llm_base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.llm_api_key}",
+                    "Content-Type": "application/json"
+                }
+
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
             if resp.status_code == 200:
                 choice = resp.json()["choices"][0]
                 msg = choice["message"]
@@ -1688,10 +1707,18 @@ STYLE:
                 "content": f"Relevant data from database:\n{ctx}\n\nQuestion: {question}",
             })
 
-            resp = requests.post(
-                f"{self.llm_base_url}/chat/completions",
-                headers=headers, json=payload, timeout=60, stream=True
-            )
+            if self.azure_endpoint:
+                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2023-05-15"
+                headers = {"api-key": self.llm_api_key, "Content-Type": "application/json"}
+                if "model" in payload: del payload["model"]
+            else:
+                url = f"{self.llm_base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.llm_api_key}",
+                    "Content-Type": "application/json"
+                }
+
+            resp = requests.post(url, headers=headers, json=payload, timeout=60, stream=True)
             if resp.status_code != 200:
                 yield f"data: {json.dumps({'type': 'done', 'answer': f'⚠️ LLM Error {resp.status_code}'})}\n\n"
                 return
