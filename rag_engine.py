@@ -471,10 +471,12 @@ class EnergyRAG:
     def _try_dataframe_answer(self, question: str) -> Optional[Dict[str, Any]]:
         ql = (question or "").lower()
 
-        # 0. Bypass for update commands → must go to Agentic Engine
+        # ALWAYS use the LLM for conversational questions to ensure professional, well-structured responses.
+        # Bypass ONLY for direct agentic update commands.
         update_keywords = ["update", "ändern", "setze", "change", "aktualisier", "korrigier", "fix", "put", "schreib"]
-        if any(x in ql for x in update_keywords):
+        if not any(x in ql for x in update_keywords):
             return None
+
 
         self.unified_df = get_unified_df()
 
@@ -1288,7 +1290,17 @@ class EnergyRAG:
         if not is_update:
             df_res = self._try_dataframe_answer(search_query)
             if df_res:
-                return df_res
+                if df_res.get("pending_action") or df_res.get("download_data"):
+                    return df_res
+                # Force the LLM to write a professional response using the exact DataFrame data
+                search_query = (
+                    f"Here is the exact calculated data for the user's query:\n"
+                    f"--- DATA START ---\n{df_res.get('answer', '')}\n--- DATA END ---\n\n"
+                    f"Please provide a highly professional, structured, and conversational response to "
+                    f"the user's question using strictly the exact numbers provided above. "
+                    f"Original Question: {search_query}"
+                )
+                # It will now fall through to the LLM!
             
         if OFFLINE:
             return {
