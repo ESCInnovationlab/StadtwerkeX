@@ -471,10 +471,9 @@ class EnergyRAG:
     def _try_dataframe_answer(self, question: str) -> Optional[Dict[str, Any]]:
         ql = (question or "").lower()
 
-        # ALWAYS use the LLM for conversational questions to ensure professional, well-structured responses.
-        # Bypass ONLY for direct agentic update commands.
+        # 0. Bypass for update commands → must go to Agentic Engine
         update_keywords = ["update", "ändern", "setze", "change", "aktualisier", "korrigier", "fix", "put", "schreib"]
-        if not any(x in ql for x in update_keywords):
+        if any(x in ql for x in update_keywords):
             return None
 
 
@@ -1609,14 +1608,24 @@ STYLE:
             if last_user_msg and len(question.split()) < 10 and not re.search(r'\d+', question):
                 search_query = f"{last_user_msg}. {question}"
 
-        # 1. Fast dataframe engine — no LLM, yield instantly as a single done event
+        # 1. Fast dataframe engine — inject exact data into LLM context instead of returning instantly
         if not is_update:
             df_res = self._try_dataframe_answer(search_query)
             if df_res:
-                yield (
-                    f"data: {json.dumps({'type': 'done', 'answer': df_res.get('answer', ''), 'pending_action': df_res.get('pending_action')})}\n\n"
+                if df_res.get("pending_action") or df_res.get("download_data"):
+                    yield (
+                        f"data: {json.dumps({'type': 'done', 'answer': df_res.get('answer', ''), 'pending_action': df_res.get('pending_action')})}\n\n"
+                    )
+                    return
+                # Force the LLM to write a professional response using the exact DataFrame data
+                search_query = (
+                    f"Here is the exact calculated data for the user's query:\n"
+                    f"--- DATA START ---\n{df_res.get('answer', '')}\n--- DATA END ---\n\n"
+                    f"Please provide a highly professional, structured, and conversational response to "
+                    f"the user's question using strictly the exact numbers provided above. "
+                    f"Original Question: {search_query}"
                 )
-                return
+                # Fall through to the LLM stream!
 
         # 2. Update commands (tool calls) and offline mode — non-streaming, single event
         if is_update or OFFLINE:
@@ -1634,10 +1643,14 @@ STYLE:
             return
 
         try:
-            results = self.vs.query(
-                query_embeddings=self.embedder.embed([search_query]), top_k=4
-            )
-            ctx = "\n---\n".join(results["documents"][0])
+            # If we already have the exact DataFrame answer, SKIP the heavy embedding model to prevent memory crashes (OOM)
+            if not is_update and 'df_res' in locals() and df_res:
+                ctx = "Exakte Daten aus dem lokalen Python-Engine (siehe Frage)."
+            else:
+                results = self.vs.query(
+                    query_embeddings=self.embedder.embed([search_query]), top_k=4
+                )
+                ctx = "\n---\n".join(results["documents"][0])
 
             headers = {
                 "Authorization": f"Bearer {self.llm_api_key}",
