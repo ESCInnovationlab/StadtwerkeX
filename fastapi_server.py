@@ -334,6 +334,37 @@ def update_asset(req: UpdateRequest):
 # -------------------------------------------------------------
 # CHAT (NORMAL)
 # -------------------------------------------------------------
+@app.get("/api/diagnostics/llm")
+def test_llm_connection():
+    if not engine:
+        return {"error": "Engine not initialized"}
+    
+    import requests
+    import os
+    
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    
+    if not endpoint or not deployment or not api_key:
+        return {"error": "Missing env vars", "endpoint": endpoint, "deployment": deployment, "api_key_length": len(api_key) if api_key else 0}
+        
+    url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version=2023-05-15"
+    headers = {"api-key": api_key}
+    payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+    
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        return {
+            "status_code": resp.status_code,
+            "response_json": resp.json() if resp.text else "No JSON",
+            "response_text": resp.text,
+            "api_key_starts_with": api_key[:5] + "...",
+            "url": url
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/api/chat")
 def chat(request: ChatRequest):
     if not engine:
