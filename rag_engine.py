@@ -317,7 +317,7 @@ class EnergyRAG:
         try:
             if self.azure_endpoint:
                 # Basic health check for Azure by trying to hit the completions endpoint with empty payload
-                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2023-05-15"
+                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2025-01-01-preview"
                 headers = {"api-key": self.llm_api_key}
                 resp = requests.post(url, headers=headers, json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=5)
             else:
@@ -1478,7 +1478,7 @@ STYLE:
                 })
 
             if self.azure_endpoint:
-                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2023-05-15"
+                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2025-01-01-preview"
                 headers = {"api-key": self.llm_api_key, "Content-Type": "application/json"}
                 # Azure doesn't like 'model' parameter in payload for some deployments
                 if "model" in payload: del payload["model"]
@@ -1733,7 +1733,7 @@ STYLE:
             })
 
             if self.azure_endpoint:
-                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2023-05-15"
+                url = f"{self.azure_endpoint.rstrip('/')}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2025-01-01-preview"
                 headers = {"api-key": self.llm_api_key, "Content-Type": "application/json"}
                 if "model" in payload: del payload["model"]
             else:

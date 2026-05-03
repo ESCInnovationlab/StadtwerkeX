@@ -349,7 +349,7 @@ def test_llm_connection():
     if not endpoint or not deployment or not api_key:
         return {"error": "Missing env vars", "endpoint": endpoint, "deployment": deployment, "api_key_length": len(api_key) if api_key else 0}
         
-    url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version=2023-05-15"
+    url = f"{endpoint.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version=2025-01-01-preview"
     headers = {"api-key": api_key}
     payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
     
